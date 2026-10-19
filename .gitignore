@@ -1,0 +1,21 @@
+# Environment and external code
+.venv/
+third_party/
+__pycache__/
+*.egg-info/
+.ipynb_checkpoints/
+
+# Data (WOMD terms: never redistribute) and caches
+data/
+*.tfrecord*
+*.pkl
+
+# Training outputs and weights (WOMD terms: never share weights)
+runs/
+outputs/
+lightning_logs/
+wandb/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
