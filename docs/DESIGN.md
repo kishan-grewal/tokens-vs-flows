@@ -2,15 +2,18 @@
 
 Backbone: catk SMART-nano (≈1.2M params, hidden 64), held identical across arms. The head lives at `SMARTAgentDecoder.token_predict_head` in `src/smart/modules/agent_decoder.py`. It is used in `forward()` (training) and `inference()`, which samples via `src/smart/utils/rollout.py::sample_next_token_traj`. The loss is `src/smart/metrics/cross_entropy.py::CrossEntropy`.
 
-## Head interface
-`ActionHead` with `loss(h, target)`, `sample(h, n, guidance=None)` and `logp_or_surrogate(h, a)`.
-- `target` / `a` is the next 0.5 s motion segment in the agent frame. For token arms it's the token id; for continuous arms it's 5 waypoints × (x, y, yaw), plus optional speed.
-- **Input embedding of the chosen action:** token arms keep catk's token embedding. Continuous arms use an MLP over the continuous segment. This difference is part of the arm.
-- Sanity check for every head: overfit 1 batch, then a 3-scenario closed-loop rollout plot.
+## Head interface (as implemented)
+Both arms run catk's map encoder, agent decoder and rollout loop unchanged. `patches/catk_action_hooks.patch` moves the two action-specific pieces of `SMARTAgentDecoder.inference()` into overridable methods: `sample_next_action()` (head + sampler) and `embed_next_action()` (input embedding of the chosen action). The token arm uses catk's defaults; the flow arm (`src/tokens_vs_flows/model.py::FlowAgentDecoder`) overrides both.
+- **Action:** the next 0.5 s segment in the agent frame at the current 2 Hz step. Token arm: a token id (catk vocabulary `agent_vocab_555_s2.pkl`, 2048 per type). Flow arm: 5 waypoints × (x, y, yaw), normalised per agent type (`action_stats.json`, 3000 training scenes).
+- **Input embedding of the chosen action:** catk embeds a token with a per-type MLP over the 8-d box contour of the token's end pose (fixed box per type). The flow arm uses the same MLPs on the contour of the continuous action's end pose: same function, continuous input.
+- **Teacher-forced history:** token arm, catk's rolling-tokenised ground truth (2 cm mean, 4 cm p95 off the raw poses on validation); flow arm, raw ground-truth poses at 2 Hz. Neither arm adds input noise (catk's behaviour-cloning config has noised tokenisation off).
+- **Targets:** the same (agent, step) pairs in both arms (valid start, end and train mask). Token: catk's CE target, the token closest to the raw next pose seen from the tokenised current pose, label smoothing 0.1. Flow: the raw logged segment.
+- Sanity check for every head: overfit 1 batch, then a 3-scenario closed-loop rollout plot (`python -m tokens_vs_flows.overfit`).
 
-## Continuous flow head
-- An MLP denoiser, 3 × 256, conditioned on the backbone hidden h plus a sinusoidal time embedding (pi0-style action expert, scaled down).
-- Rectified-flow / conditional flow matching loss (Lipman et al.). Sampling: Euler, 10 steps by default; record the realism vs steps curve at 1, 2, 5, 10.
+## Continuous flow head (as implemented)
+- A minimal MLP denoiser: [x_t, h, sinusoidal(t)] → 3 × (Linear 256 + SiLU) → Linear 15, last layer zero-initialised; 172k parameters (catk's token head: 137k; shared backbone 1.02M). A FiLM-residual variant (897k parameters) was not used, to keep the heads comparable in size. We call it a *minimal flow head*: Flow-ERD's AFM decoder (chunked transformer, per-type kinematics, receding horizon) is much stronger.
+- Rectified-flow / conditional flow matching loss (Lipman et al.): x_t = (1 − t) x0 + t x1, x0 ~ N(0, I), t ~ U[0, 1], target x1 − x0; 4 noise draws per target, loss in fp32. Sampling: Euler, 10 steps by default; record the realism vs steps curve at 1, 2, 5, 10.
+- Training (both arms): AdamW, lr 5e-4, cosine to 1%, weight decay 0.01, gradient clip 0.5, fp32 with TF32 matmuls (catk's embedding code fails under bf16 autocast). A batch too large for GPU memory is processed in micro-batches with gradient accumulation (same gradient).
 - Optional per-type kinematics (Flow-ERD): predict bicycle-model controls for vehicles and cyclists, displacements for pedestrians. Use it only if the plain version beats the constant-velocity baseline and compute remains.
 
 ## Uniform-bin head (factorisation study)

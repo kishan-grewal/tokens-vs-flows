@@ -1,0 +1,121 @@
+Action hooks for NVlabs/catk (commit d238867), src/smart/modules/agent_decoder.py.
+Moves the next-action sampling and the chosen-action embedding of SMARTAgentDecoder.inference()
+into two overridable methods, sample_next_action() and embed_next_action(). Behaviour of the
+token head is unchanged. The continuous heads in src/tokens_vs_flows override these methods.
+Derivative of code under the NVIDIA Source Code License for CAT-K (non-commercial use only);
+see third_party/catk/LICENSE.
+
+diff --git a/src/smart/modules/agent_decoder.py b/src/smart/modules/agent_decoder.py
+index a025235..a082e77 100644
+--- a/src/smart/modules/agent_decoder.py
++++ b/src/smart/modules/agent_decoder.py
+@@ -451,6 +451,48 @@ class SMARTAgentDecoder(nn.Module):
+             "gt_valid": tokenized_agent["valid_mask"],  # [n_agent, 18]
+         }
+ 
++    def sample_next_action(
++        self,
++        feat_a_now,  # [n_agent, hidden_dim]
++        tokenized_agent: Dict[str, torch.Tensor],
++        sampling_scheme: DictConfig,
++        pos_now,  # [n_agent, 2]
++        head_now,  # [n_agent]
++        n_step: int,
++    ):
++        """Action hook: token head + top-k sampling. Subclasses may replace the head."""
++        next_token_logits = self.token_predict_head(feat_a_now)
++        next_token_idx, next_token_traj_all = sample_next_token_traj(
++            token_traj=tokenized_agent["token_traj"],
++            token_traj_all=tokenized_agent["token_traj_all"],
++            sampling_scheme=sampling_scheme,
++            # ! for most-likely sampling
++            next_token_logits=next_token_logits,
++            # ! for nearest-pos sampling
++            pos_now=pos_now,  # [n_agent, 2]
++            head_now=head_now,  # [n_agent]
++            pos_next_gt=tokenized_agent["gt_pos_raw"][:, n_step],  # [n_agent, 2]
++            head_next_gt=tokenized_agent["gt_head_raw"][:, n_step],  # [n_agent]
++            valid_next_gt=tokenized_agent["gt_valid_raw"][:, n_step],  # [n_agent]
++            token_agent_shape=tokenized_agent["token_agent_shape"],  # [n_token, 2]
++        )  # next_token_idx: [n_agent], next_token_traj_all: [n_agent, 6, 4, 2]
++        return next_token_logits, next_token_idx, next_token_traj_all
++
++    def embed_next_action(
++        self,
++        next_token_idx,  # [n_agent]
++        next_token_traj_all,  # [n_agent, 6, 4, 2]
++        agent_token_emb_tables,  # (veh, ped, cyc), each [n_token, hidden_dim]
++        type_masks,  # (veh, ped, cyc), each [n_agent]
++    ):
++        """Action hook: embedding of the chosen action, looked up from the token tables."""
++        agent_token_emb_next = next_token_traj_all.new_zeros(
++            (next_token_idx.shape[0], self.hidden_dim)
++        )
++        for table, mask in zip(agent_token_emb_tables, type_masks):
++            agent_token_emb_next[mask] = table[next_token_idx[mask]]
++        return agent_token_emb_next
++
+     def inference(
+         self,
+         tokenized_agent: Dict[str, torch.Tensor],
+@@ -620,23 +662,17 @@ class SMARTAgentDecoder(nn.Module):
+                         )
+ 
+             # ! get outputs
+-            next_token_logits = self.token_predict_head(feat_a_now)
+-            next_token_logits_list.append(next_token_logits)  # [n_agent, n_token]
+-
+-            next_token_idx, next_token_traj_all = sample_next_token_traj(
+-                token_traj=tokenized_agent["token_traj"],
+-                token_traj_all=tokenized_agent["token_traj_all"],
+-                sampling_scheme=sampling_scheme,
+-                # ! for most-likely sampling
+-                next_token_logits=next_token_logits,
+-                # ! for nearest-pos sampling
+-                pos_now=pos_a[:, t_now],  # [n_agent, 2]
+-                head_now=head_a[:, t_now],  # [n_agent]
+-                pos_next_gt=tokenized_agent["gt_pos_raw"][:, n_step],  # [n_agent, 2]
+-                head_next_gt=tokenized_agent["gt_head_raw"][:, n_step],  # [n_agent]
+-                valid_next_gt=tokenized_agent["gt_valid_raw"][:, n_step],  # [n_agent]
+-                token_agent_shape=tokenized_agent["token_agent_shape"],  # [n_token, 2]
++            next_token_logits, next_token_idx, next_token_traj_all = (
++                self.sample_next_action(
++                    feat_a_now=feat_a_now,
++                    tokenized_agent=tokenized_agent,
++                    sampling_scheme=sampling_scheme,
++                    pos_now=pos_a[:, t_now],  # [n_agent, 2]
++                    head_now=head_a[:, t_now],  # [n_agent]
++                    n_step=n_step,
++                )
+             )  # next_token_idx: [n_agent], next_token_traj_all: [n_agent, 6, 4, 2]
++            next_token_logits_list.append(next_token_logits)  # [n_agent, n_token]
+ 
+             diff_xy = next_token_traj_all[:, -1, 0] - next_token_traj_all[:, -1, 3]
+             next_token_action_list.append(
+@@ -684,16 +720,16 @@ class SMARTAgentDecoder(nn.Module):
+             )
+ 
+             # ! get agent_token_emb_next
+-            agent_token_emb_next = torch.zeros_like(agent_token_emb[:, 0])
+-            agent_token_emb_next[veh_mask] = agent_token_emb_veh[
+-                next_token_idx[veh_mask]
+-            ]
+-            agent_token_emb_next[ped_mask] = agent_token_emb_ped[
+-                next_token_idx[ped_mask]
+-            ]
+-            agent_token_emb_next[cyc_mask] = agent_token_emb_cyc[
+-                next_token_idx[cyc_mask]
+-            ]
++            agent_token_emb_next = self.embed_next_action(
++                next_token_idx=next_token_idx,
++                next_token_traj_all=next_token_traj_all,
++                agent_token_emb_tables=(
++                    agent_token_emb_veh,
++                    agent_token_emb_ped,
++                    agent_token_emb_cyc,
++                ),
++                type_masks=(veh_mask, ped_mask, cyc_mask),
++            )
+             agent_token_emb = torch.cat(
+                 [agent_token_emb, agent_token_emb_next.unsqueeze(1)], dim=1
+             )
