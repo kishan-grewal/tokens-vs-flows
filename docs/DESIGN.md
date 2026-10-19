@@ -35,13 +35,12 @@ Discrete Flow Matching (Gat et al.) with a masked or uniform source over the sam
 - **On-policy:** PPO-clip on tokens with the exact log-ratio. FPO on flow, with the ratio exp(−(L_CFM,θ − L_CFM,old)) estimated using shared noise and time samples (see the FPO paper). Same reward, same K, same number of updates, same KL/anchor budget: the exact KL to the behaviour-cloning model for tokens, the CFM loss to the frozen behaviour-cloning model for flow.
 - No RoaD/CAT-K stage by default: RL starts straight from the behaviour-cloning checkpoints, since a weaker base shows larger RL gains (RLFTSim). Add RoaD only if offline AWR fails to improve either head.
 
-## Metrics (eval/score.py; frozen before any model comparison)
-- Realism meta-metric and its components (TrajTok fast metric, 2025 version).
-- Collision and off-road rates.
-- minADE.
-- CPD diversity (Flow-ERD definition) and intent entropy over the 8 WOMD trajectory types.
-- GT_UB, the ground-truth replay score on the same scenarios.
-- Paired per-scenario deltas with bootstrap 95% CIs.
+## Metrics (eval/, frozen before any model comparison; definitions in eval/README.md)
+- Realism meta-metric (WOSAC 2025) and its kinematic / interactive / map buckets, via the TrajTok fast metric (meta-metric within 1e-6 of the official metric on our check, every component within 2e-5).
+- Collision, off-road and traffic-light violation rates; ADE and minADE.
+- CPD diversity (Flow-ERD Eqs. 20-21, our per-type scales) and ego intent entropy over the 8 WOMD trajectory types.
+- GT_UB, the log-replay score on the same scenarios; constant-velocity and random-agent baselines.
+- Paired per-scenario deltas with bootstrap 95% CIs (eval/compare.py).
 
 ## Pitfalls
 - Collision plus off-road make up 50% of the realism score, and the ground truth itself contains about 4.2% false collisions and 16.3% false off-road events. A copy of the ground truth that never crashes only scores ≈0.72. Always report the parts.

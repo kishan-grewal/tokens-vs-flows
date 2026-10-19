@@ -44,41 +44,38 @@ def _style(ax):
 
 def head_comparison(arms: Dict[str, List[Path]], out: Path, refs: Optional[Dict[str, dict]] = None,
                     title: str = "") -> None:
-    """One panel per metric: arm mean (bar) and each seed (dot); grey reference lines if given.
+    """One panel per metric: each seed as a dot and the arm mean as a tick, on an axis zoomed to the arms
+    (differences between heads are small next to the baselines). Reference values (log replay, constant
+    velocity) are printed under each panel title instead of drawn, so they do not flatten the comparison.
 
-    arms: {"token": [run dirs], "flow": [run dirs]}; refs: {"log replay": {...}, "constant velocity": {...}}
-    holding the same keys as metrics_detail.json.
+    arms: {"token": [run dirs], "flow": [run dirs]}; refs: {"log replay": {...}, "const. velocity": {...}} with the
+    keys of metrics_detail.json.
     """
     details = {a: [load_detail(r) for r in runs] for a, runs in arms.items()}
-    fig, axes = plt.subplots(2, 4, figsize=(13, 5.6))
+    fig, axes = plt.subplots(2, 4, figsize=(13, 6.2))
     for ax, (label, key, better) in zip(axes.flat, PANELS):
         _style(ax)
         for i, (arm, ds) in enumerate(details.items()):
             vals = np.array([d[key] for d in ds], dtype=float)
-            ax.bar(i, vals.mean(), width=0.55, color=ARM_COLORS.get(arm, MUTED), alpha=0.85, edgecolor="white",
-                   linewidth=2, zorder=2)
-            ax.scatter(np.full(len(vals), i) + np.linspace(-0.12, 0.12, len(vals)), vals, s=18, color=INK,
-                       zorder=3, linewidths=0)
-            ax.text(i, vals.mean(), f"{vals.mean():.3f}" if key != "minADE" else f"{vals.mean():.2f}",
-                    ha="center", va="bottom", fontsize=8, color=INK)
-        for j, (name, r) in enumerate((refs or {}).items()):
-            if key in r and r[key] not in ("", None):
-                ax.axhline(float(r[key]), color=MUTED, lw=1, ls=(0, (4, 2)) if j == 0 else (0, (1, 2)), zorder=1)
-                ax.text(len(details) - 0.45, float(r[key]), name, fontsize=7, color=MUTED, va="bottom", ha="right")
+            color = ARM_COLORS.get(arm, MUTED)
+            x = np.full(len(vals), i) + (np.linspace(-0.08, 0.08, len(vals)) if len(vals) > 1 else 0)
+            ax.scatter(x, vals, s=26, color=color, zorder=3, linewidths=0.8, edgecolors="white")
+            ax.hlines(vals.mean(), i - 0.22, i + 0.22, color=color, lw=2.2, zorder=2)
+            fmt = "{:.2f}" if key == "minADE" else "{:.4f}"
+            ax.text(i + 0.26, vals.mean(), fmt.format(vals.mean()), va="center", ha="left", fontsize=8, color=INK)
         ax.set_xticks(range(len(details)), list(details), fontsize=9)
-        arrow = "" if better is None else (" (higher better)" if better else " (lower better)")
-        ax.set_title(label + arrow, fontsize=9, color=INK)
-        lo = min(min(d[key] for d in ds) for ds in details.values())
-        hi = max(max(d[key] for d in ds) for ds in details.values())
-        if key in ("realism", "kinematic", "interactive", "map"):
-            ref_vals = [float(r[key]) for r in (refs or {}).values() if r.get(key) not in ("", None)]
-            lo = min([lo] + ref_vals)
-            hi = max([hi] + ref_vals)
-            pad = 0.15 * (hi - lo + 1e-3)
-            ax.set_ylim(max(0, lo - pad), hi + pad)
+        ax.set_xlim(-0.5, len(details) - 0.2)
+        arrow = "" if better is None else (" ↑" if better else " ↓")
+        ref_txt = "  ".join(f"{n} {float(r[key]):.3f}" for n, r in (refs or {}).items()
+                            if r.get(key) not in ("", None))
+        ax.set_title(label + arrow + (f"\n{ref_txt}" if ref_txt else ""), fontsize=9, color=INK)
+        all_vals = np.concatenate([[d[key] for d in ds] for ds in details.values()]).astype(float)
+        lo, hi = np.nanmin(all_vals), np.nanmax(all_vals)
+        pad = 0.25 * (hi - lo) if hi > lo else 0.05 * max(abs(hi), 1e-3)
+        ax.set_ylim(lo - pad, hi + pad)
     n = {a: len(r) for a, r in arms.items()}
-    fig.suptitle(title or f"Token vs flow head on SMART-nano, val_frozen, 32 rollouts ({n} seeds)", fontsize=11,
-                 color=INK)
+    fig.suptitle(title or f"Token vs flow head on SMART-nano: val_frozen, 32 rollouts, seeds {n} "
+                          "(dot = seed, tick = mean; ↑/↓ = higher/lower is better)", fontsize=10.5, color=INK)
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
