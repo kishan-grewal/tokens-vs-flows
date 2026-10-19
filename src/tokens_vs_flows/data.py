@@ -1,5 +1,6 @@
 """Datasets over catk's preprocessed scenario pickles (data/cache/SMART)."""
 import pickle
+import resource
 from pathlib import Path
 from typing import Iterator, List, Optional
 
@@ -10,6 +11,12 @@ from torch_geometric.loader import DataLoader
 
 from tokens_vs_flows import CACHE, SPLITS
 from src.smart.datamodules.target_builder import WaymoTargetBuilderTrain, WaymoTargetBuilderVal
+
+# A collated PyG batch holds many small tensors; DataLoader workers share each through a file descriptor, which
+# exhausts a 1024 soft limit ("received 0 items of ancdata"). Raise the soft limit to the hard limit.
+_soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+if _soft < _hard:
+    resource.setrlimit(resource.RLIMIT_NOFILE, (_hard, _hard))
 
 
 class ScenarioDataset(Dataset):
