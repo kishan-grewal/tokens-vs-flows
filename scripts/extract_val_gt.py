@@ -1,7 +1,8 @@
-"""Write one ground-truth pickle per validation scenario for the fast WOSAC metric.
+"""Write one ground-truth pickle per scenario for the fast WOSAC metric (validation, or training shards for rewards).
 
 Uses TrajTok's converter (wosac_fast_eval_tool.scenario_gt_converter.extract_gt_scenario), one
-worker per shard. Also writes <output_dir>/../validation_index.tsv (scenario_id, shard file).
+worker per shard. Also writes <output_dir>_index.tsv (scenario_id, shard file).
+Usage: extract_val_gt.py --input_dir <dir of shards> --output_dir <dir> [--num_workers 8] [--max_shards N]
 """
 import argparse
 import os
@@ -41,12 +42,15 @@ def main():
     ap.add_argument("--input_dir", required=True)
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--num_workers", type=int, default=8)
+    ap.add_argument("--max_shards", type=int, default=0)
     args = ap.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     shards = sorted(p.as_posix() for p in Path(args.input_dir).glob("*tfrecord*"))
+    if args.max_shards:
+        shards = shards[:args.max_shards]
     with Pool(args.num_workers) as pool:
         results = pool.map(partial(process_shard, output_dir=args.output_dir), shards)
-    index = Path(args.output_dir).parent / "validation_index.tsv"
+    index = Path(str(Path(args.output_dir)) + "_index.tsv")
     with open(index, "w") as f:
         for shard, ids in sorted(results):
             for sid in ids:
