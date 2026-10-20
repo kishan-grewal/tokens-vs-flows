@@ -111,6 +111,9 @@ def main():
     for t, name in TYPES.items():
         c = {k: torch.cat(v) for k, v in acc[t].items()}
         row = {"n_steps": int(c["m"].sum())}
+        pos_err = torch.stack([c["lon"], c["lat"]], dim=-1).norm(dim=-1)[c["m"]]
+        row["frac_steps_pos_err_over_1m"] = float((pos_err > 1.0).float().mean())  # tokenisation failures
+        row["frac_steps_pos_err_over_0.1m"] = float((pos_err > 0.1).float().mean())
         for k in ("lon", "lat", "head", "speed"):
             mk = c["ms"] if k == "speed" else c["m"]
             v = c[k][mk]
