@@ -76,6 +76,80 @@ def action_quantities(model, out, store=None, n_mc=8, gen=None):
     return {"logp": -loss.mean(-1), "t": t, "eps": eps}
 
 
+def parts(idxs: list, n: int) -> list:
+    return [idxs[j::n] for j in range(n) if idxs[j::n]]
+
+
+def load(ds, idxs: list, dev):
+    return next(iter(DataLoader(ds, batch_size=len(idxs), sampler=idxs))).to(dev)
+
+
+def store_pass(policy, ref, ds, idxs: list, args, gen) -> dict:
+    """Old-policy and reference quantities for the rollout scenes `idxs`, per scene. Scenes that do not fit in GPU
+    memory together are processed in 2, 4, ... parts (as in train.train_step)."""
+    n = 1
+    while True:
+        try:
+            out = {}
+            with torch.no_grad():
+                for part in parts(idxs, n):
+                    b = load(ds, part, args.device)
+                    out_old = policy.policy_inputs(b)
+                    q_old = action_quantities(policy, out_old, n_mc=args.n_mc, gen=gen)
+                    q_ref = action_quantities(ref, ref.policy_inputs(b), store=q_old)
+                    per_item = out_old["mask"].sum(-1).split(torch.bincount(b["agent"]["batch"], minlength=len(part)).tolist())
+                    n_act = [int(x.sum()) for x in per_item]
+                    for j, i in enumerate(part):
+                        sl = slice(sum(n_act[:j]), sum(n_act[:j + 1]))
+                        out[i] = {k: v[sl].cpu() for k, v in q_old.items()}
+                        out[i]["logp_ref"] = q_ref["logp"][sl].cpu()
+                        out[i]["adv"] = float(b["weight"][j])
+            return out
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            n *= 2
+            if n > len(idxs):
+                raise
+
+
+def update_step(policy, opt, ds, idxs: list, store: dict, args):
+    """One optimiser step on the rollout scenes `idxs`: -min(r A, clip(r) A) + kl_coef * k3, averaged over the
+    minibatch's valid actions. If the scenes do not fit in GPU memory together they are processed in 2, 4, ... parts
+    with gradient accumulation (per-part sums over the minibatch's action count: the same gradient).
+    Returns (ratios, mean k3, clip fraction, n parts)."""
+    dev = args.device
+    n_ok = sum(int(torch.isfinite(store[i]["logp"]).sum()) for i in idxs)  # the support is fixed: known in advance
+    n = 1
+    while True:
+        try:
+            opt.zero_grad(set_to_none=True)
+            ratios, k3_sum = [], 0.0
+            for part in parts(idxs, n):
+                b = load(ds, part, dev)
+                st = {k: torch.cat([store[i][k] for i in part]).to(dev) for k in store[part[0]] if k != "adv"}
+                advs = torch.cat([torch.full((len(store[i]["logp"]),), store[i]["adv"]) for i in part]).to(dev)
+                q = action_quantities(policy, policy.policy_inputs(b), store=st)
+                ok = torch.isfinite(st["logp"]) & torch.isfinite(q["logp"])
+                ratio = (q["logp"] - st["logp"])[ok].exp()
+                A = advs[ok]
+                surr = -torch.min(ratio * A, ratio.clamp(1 - args.clip, 1 + args.clip) * A).sum()
+                log_rho = (st["logp_ref"] - q["logp"])[ok]
+                k3 = (log_rho.exp() - 1 - log_rho).sum()
+                ((surr + args.kl_coef * k3) / max(n_ok, 1)).backward()
+                ratios.append(ratio.detach())
+                k3_sum += float(k3.detach())
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+            opt.step()
+            r = torch.cat(ratios)
+            return r, k3_sum / max(n_ok, 1), float(((r - 1).abs() > args.clip).float().mean()), n
+        except torch.cuda.OutOfMemoryError:
+            opt.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            n *= 2
+            if n > len(idxs):
+                raise
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--init", type=Path, required=True, help="run dir of the BC policy (start and KL reference)")
@@ -124,7 +198,7 @@ def main():
     wr = csv.writer(log)
     if start == 0:
         wr.writerow(["iter", "train_realism_k", "adv_std_raw", "ratio_mean", "ratio_std", "clip_frac", "k3", "kl_coef",
-                     "frac_outside_support", "n_actions", "seconds"])
+                     "frac_outside_support", "n_actions", "seconds", "split_steps"])
     for it in range(start, args.iters):
         t0 = time.time()
         scenes = sorted(random.Random(1_000_000 + 1000 * args.seed + it).sample(pool, args.scenes))
@@ -140,52 +214,27 @@ def main():
 
         # old-policy and reference quantities, stored per rollout scene (item)
         store = {}
-        with torch.no_grad():
-            for idxs in batches(len(ds), args.minibatch, cpu_gen):
-                b = next(iter(DataLoader(ds, batch_size=len(idxs), sampler=idxs))).to(dev)
-                out_old = policy.policy_inputs(b)
-                q_old = action_quantities(policy, out_old, n_mc=args.n_mc, gen=gen)
-                q_ref = action_quantities(ref, ref.policy_inputs(b), store=q_old)
-                per_item = (out_old["mask"].sum(-1)).split(torch.bincount(b["agent"]["batch"], minlength=len(idxs)).tolist())
-                n_act = [int(x.sum()) for x in per_item]
-                for j, i in enumerate(idxs):
-                    sl = slice(sum(n_act[:j]), sum(n_act[:j + 1]))
-                    store[i] = {k: v[sl].cpu() for k, v in q_old.items()}
-                    store[i]["logp_ref"] = q_ref["logp"][sl].cpu()
-                    store[i]["adv"] = float(b["weight"][j])
+        for idxs in batches(len(ds), args.minibatch, cpu_gen):
+            store.update(store_pass(policy, ref, ds, idxs, args, gen))
         n_actions = sum(len(v["logp"]) for v in store.values())
         out_frac = float(np.mean([float((~torch.isfinite(v["logp"])).float().mean()) for v in store.values()]))
 
-        stats = {"ratio": [], "clip": [], "k3": []}
+        stats = {"ratio": [], "clip": [], "k3": [], "parts": []}
         for _ in range(args.epochs):
             for idxs in batches(len(ds), args.minibatch, cpu_gen):
-                b = next(iter(DataLoader(ds, batch_size=len(idxs), sampler=idxs))).to(dev)
-                st = {k: torch.cat([store[i][k] for i in idxs]).to(dev) for k in store[idxs[0]] if k != "adv"}
-                advs = torch.cat([torch.full((len(store[i]["logp"]),), store[i]["adv"]) for i in idxs]).to(dev)
-                q = action_quantities(policy, policy.policy_inputs(b), store=st)
-                ok = torch.isfinite(st["logp"]) & torch.isfinite(q["logp"])
-                log_r = (q["logp"] - st["logp"])[ok]
-                ratio = log_r.exp()
-                A = advs[ok]
-                surr = -torch.min(ratio * A, ratio.clamp(1 - args.clip, 1 + args.clip) * A).mean()
-                log_rho = (st["logp_ref"] - q["logp"])[ok]
-                k3 = (log_rho.exp() - 1 - log_rho).mean()
-                loss = surr + args.kl_coef * k3
-                opt.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
-                opt.step()
-                stats["ratio"].append(ratio.detach())
-                stats["clip"].append(((ratio - 1).abs() > args.clip).float().mean().detach())
-                stats["k3"].append(float(k3.detach()))
+                ratio, k3, clip_frac, n_parts = update_step(policy, opt, ds, idxs, store, args)
+                stats["ratio"].append(ratio)
+                stats["clip"].append(clip_frac)
+                stats["k3"].append(k3)
+                stats["parts"].append(n_parts)
         # adaptive anchor (Ziegler et al.): move the coefficient toward the common KL target
         k3_now = float(np.mean(stats["k3"][-max(1, len(stats["k3"]) // args.epochs):]))
         args.kl_coef *= 1 + float(np.clip(k3_now / args.kl_target - 1, -0.2, 0.2)) / args.kl_horizon
         ratios = torch.cat(stats["ratio"])
         m_all = float(np.mean([rewards[s]["m_all"] for s in scenes]))
         wr.writerow([it + 1, f"{m_all:.5f}", f"{adv_std:.5f}", f"{ratios.mean():.4f}", f"{ratios.std():.4f}",
-                     f"{float(torch.stack(stats['clip']).mean()):.4f}", f"{k3_now:.5f}", f"{args.kl_coef:.4f}",
-                     f"{out_frac:.4f}", n_actions, f"{time.time() - t0:.1f}"])
+                     f"{float(np.mean(stats['clip'])):.4f}", f"{k3_now:.5f}", f"{args.kl_coef:.4f}",
+                     f"{out_frac:.4f}", n_actions, f"{time.time() - t0:.1f}", sum(n > 1 for n in stats["parts"])])
         log.flush()
         if (it + 1) % args.ckpt_every == 0 or it + 1 == args.iters:
             save(last, policy, opt, {"iter": it + 1, "kl_coef": args.kl_coef})
