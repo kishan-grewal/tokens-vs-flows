@@ -195,6 +195,74 @@ def realism_ladder(entries: List[Tuple[str, List[Path], str]], out: Path, title:
     plt.close(fig)
 
 
+FIELDS = [("kinematic", ["linear_speed", "linear_acceleration", "angular_speed", "angular_acceleration"]),
+          ("interactive", ["distance_to_nearest_object", "collision_indication", "time_to_collision"]),
+          ("map", ["distance_to_road_edge", "offroad_indication", "traffic_light_violation"])]
+
+
+def per_scenario(runs: List[Path]) -> Dict[str, np.ndarray]:
+    """Per-scenario values averaged over seeds (runs/<id>/per_scenario.csv), rows sorted by scenario id."""
+    import csv
+    tables = []
+    for r in runs:
+        with open(Path(r) / "per_scenario.csv") as f:
+            rows = sorted(csv.DictReader(f), key=lambda x: x["scenario_id"])
+        tables.append({k: np.array([float(x[k]) for x in rows]) for k in rows[0] if k != "scenario_id"})
+    return {k: np.mean([t[k] for t in tables], 0) for k in tables[0]}
+
+
+def field_gaps(a_runs: List[Path], b_runs: List[Path], out: Path, labels=("token", "flow"), title: str = "",
+               n_boot: int = 10000) -> None:
+    """Where the realism gap between two arms comes from: per WOSAC field, the paired per-scenario difference
+    b - a of the likelihood (left) and its weighted contribution to the meta-metric difference (right), with 95%
+    bootstrap intervals over scenarios. Dots take the colour of the arm that is better on that field."""
+    import sys
+    from tokens_vs_flows import ROOT
+    sys.path.insert(0, str(ROOT / "eval"))
+    import wosac
+    cfg = wosac.load_config()
+    a, b = per_scenario(a_runs), per_scenario(b_runs)
+    rng = np.random.default_rng(0)
+    n = len(a["metametric"])
+    idx = rng.integers(0, n, size=(n_boot, n))
+    rows = [("realism (meta-metric)", "metametric", 1.0, None)]
+    for bucket, fields in FIELDS:
+        rows += [(f"{f.replace('_', ' ')}", f + "_likelihood", getattr(cfg, f).metametric_weight, bucket)
+                 for f in fields]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 0.42 * len(rows) + 1.6), sharey=True)
+    for k, ax in enumerate(axes):
+        _style(ax)
+        ax.yaxis.grid(False)
+        ax.xaxis.grid(True, color=GRID, lw=0.8)
+        ax.axvline(0, color=MUTED, lw=1)
+        for i, (lab, key, w, bucket) in enumerate(rows):
+            d = (b[key] - a[key]) * (w if k == 1 else 1.0)
+            boot = d[idx].mean(1)
+            lo, hi = np.percentile(boot, [2.5, 97.5])
+            c = ARM_COLORS.get(labels[1] if d.mean() > 0 else labels[0], MUTED)
+            ax.plot([lo, hi], [i, i], color=c, lw=2, solid_capstyle="round")
+            ax.scatter(d.mean(), i, s=46 if i else 70, color=c, zorder=3, edgecolors="white", linewidths=1.5)
+            ax.annotate(f"{d.mean():+.4f}", (hi, i), xytext=(6, 0), textcoords="offset points", va="center",
+                        fontsize=7.5, color=INK)
+        ax.set_title(("likelihood difference" if k == 0 else "weighted contribution to the realism difference")
+                     + f" ({labels[1]} − {labels[0]})", fontsize=9.5, color=INK)
+        xl = ax.get_xlim()
+        ax.set_xlim(xl[0], xl[1] + 0.25 * (xl[1] - xl[0]))
+    for arm in labels:
+        axes[1].scatter([], [], s=46, color=ARM_COLORS.get(arm, MUTED), label=f"{arm} better")
+    axes[1].legend(fontsize=8, frameon=False, loc="upper right")
+    names = [r[0] + (f"  [{r[3]}, w {r[2]:.2f}]" if r[3] else "") for r in rows]
+    axes[0].set_yticks(range(len(rows)), names, fontsize=8.5, color=INK)
+    axes[0].invert_yaxis()
+    fig.suptitle(title or f"Per-field realism gap, paired over {n} val_frozen scenarios (seeds: {labels[0]} "
+                          f"{len(a_runs)}, {labels[1]} {len(b_runs)}); colour = the better arm on that field",
+                 fontsize=10, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None:
     """Metrics against fine-tuning round for each head; round 0 is the behaviour-cloned start.
 
@@ -261,7 +329,8 @@ def main():
                      ceilings={"log replay": runs / "eval_log_replay", "token replay": runs / "eval_token_replay"},
                      title=f"Sampling knobs trade diversity for realism (seed {s}, val_frozen; ringed = configured point;"
                            " token: top-k, flow: initial-noise scale)")
-    print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png")
+    field_gaps(seeds["token"], seeds["flow"], figs / "field_gaps_token_vs_flow.png")
+    print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png", figs / "field_gaps_token_vs_flow.png")
 
 
 if __name__ == "__main__":
