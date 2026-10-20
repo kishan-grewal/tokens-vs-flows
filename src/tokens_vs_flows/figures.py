@@ -278,14 +278,17 @@ def event_timing(runs: Dict[str, Tuple[List[Path], str]], out: Path, title: str 
     for ax, key, label in zip(axes, ["collision", "offroad"], ["collision", "off-road"]):
         _style(ax)
         ax.xaxis.grid(True, color=GRID, lw=0.8)
+        placed = []
         for name, (dirs, kind) in runs.items():
             ds = [json.loads((Path(r) / "event_timing.json").read_text()) for r in dirs]
             t = np.array(ds[0]["t_seconds"])
             y = np.mean([d["share_with_event_by_t"][key] for d in ds], 0)
             c, ls, lw = styles[name]
             ax.plot(t, y, color=c, ls=ls, lw=lw, label=name)
-            ax.annotate(f"{y[-1]:.3f}", (t[-1], y[-1]), xytext=(4, 0), textcoords="offset points", va="center",
-                        fontsize=7.5, color=INK)
+            if all(abs(y[-1] - q) > 0.004 for q in placed):  # skip a label that would overprint another
+                ax.annotate(f"{y[-1]:.3f}", (t[-1], y[-1]), xytext=(4, 0), textcoords="offset points", va="center",
+                            fontsize=7.5, color=INK)
+                placed.append(y[-1])
         ax.set_xlim(0, 8.9)
         ax.set_ylim(0, None)
         ax.set_xlabel("time since the end of the logged history (s)", fontsize=8, color=MUTED)
