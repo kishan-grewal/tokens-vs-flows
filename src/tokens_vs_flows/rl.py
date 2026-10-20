@@ -137,9 +137,32 @@ def calibrate(rewards: dict, args, run_dir: Path, seconds: dict) -> None:
     print(json.dumps(info, indent=1), flush=True)
 
 
+class AnchorScenes(Dataset):
+    """Logged training scenes (not rollouts) with weight 1: the data anchor mixed into weighted fine-tuning."""
+
+    def __init__(self, scenario_ids: list) -> None:
+        self.inner = ScenarioDataset(CACHE / "training", scenario_ids=scenario_ids, train=True)
+        super().__init__()
+
+    def len(self) -> int:
+        return self.inner.len()
+
+    def get(self, idx: int):
+        data = self.inner.get(idx)
+        data["weight"] = torch.tensor([1.0])
+        return self.inner.transform(data)
+
+
 def finetune(model, rollouts: dict, weights: dict, args) -> list:
-    """One epoch of weighted behaviour cloning over all rollouts (fixed seeded order), cosine lr."""
+    """One epoch of weighted behaviour cloning over all rollouts (fixed seeded order), cosine lr. With
+    --gt-anchor r > 0, logged training scenes (weight 1, r per rollout, outside the round's scenes) are mixed in."""
     ds = RolloutScenes(rollouts, weights)
+    if args.gt_anchor > 0:
+        pool = [p.stem for p in sorted((CACHE / "training").glob("*.pkl"))]
+        taken = set(rollouts)
+        rng = random.Random(20_000 + 100 * args.seed + args.round)
+        anchor_ids = [s for s in rng.sample(pool, int(len(ds) * args.gt_anchor) + len(taken)) if s not in taken]
+        ds = torch.utils.data.ConcatDataset([ds, AnchorScenes(anchor_ids[:int(len(ds) * args.gt_anchor)])])
     g = torch.Generator().manual_seed(args.seed * 100 + args.round)
     loader = DataLoader(ds, batch_size=args.batch_size, sampler=torch.randperm(len(ds), generator=g).tolist(),
                         num_workers=8, drop_last=False)
@@ -163,6 +186,7 @@ def main():
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--beta", type=float, default=0.02)
     ap.add_argument("--w-max", type=float, default=20.0)
+    ap.add_argument("--gt-anchor", type=float, default=0.0, help="logged scenes per rollout mixed into the fine-tune")
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--lr-min-ratio", type=float, default=0.1)
     ap.add_argument("--batch-size", type=int, default=16)
