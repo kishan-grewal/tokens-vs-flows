@@ -17,10 +17,10 @@ from tokens_vs_flows.model import ModelConfig, SimAgent
 from tokens_vs_flows.train import setup_cuda
 
 
-def load_model(run: Path, ckpt: str = "final", **overrides) -> SimAgent:
-    ck = torch.load(run / "ckpt" / f"{ckpt}.pt", map_location="cuda")
+def load_model(run: Path, ckpt: str = "final", device: str = "cuda", **overrides) -> SimAgent:
+    ck = torch.load(run / "ckpt" / f"{ckpt}.pt", map_location=device)
     cfg = ModelConfig(**{**ck["cfg"], **{k: v for k, v in overrides.items() if v is not None}})
-    model = SimAgent(cfg).cuda()
+    model = SimAgent(cfg).to(device)
     model.load_state_dict(ck["model"])
     return model.eval()
 

@@ -46,12 +46,12 @@ def round_scenes(round_idx: int, n: int) -> list:
 
 
 @torch.no_grad()
-def collect(model, scene_ids, k: int, batch_size: int = 32) -> dict:
+def collect(model, scene_ids, k: int, batch_size: int = 32, device: str = "cuda") -> dict:
     """{scenario_id: {"agent_id": [A], "states": [K, A, 80, 4]}} of K closed-loop rollouts per scene."""
     ds = ScenarioDataset(CACHE / "training", scenario_ids=scene_ids)
     out = {}
     for batch in DataLoader(ds, batch_size=batch_size, num_workers=8):
-        batch = batch.cuda(non_blocking=True)
+        batch = batch.to(device)
         ro = model.rollout(batch, k)
         states = torch.cat([ro["pos"], ro["z"][..., None], ro["head"][..., None]], dim=-1)  # [A, K, 80, 4]
         for s, sid in enumerate(batch["scenario_id"]):
@@ -120,6 +120,23 @@ class RolloutScenes(Dataset):
         return data
 
 
+def calibrate(rewards: dict, args, run_dir: Path, seconds: dict) -> None:
+    """Advantage and weight statistics for a range of temperatures (absolute and relative to the advantage std)."""
+    r = np.array([v["r"] for v in rewards.values()])
+    a = r - r.mean(1, keepdims=True)
+    sd = float(a.std())
+    rows = []
+    for beta in sorted({*(np.array([0.25, 0.5, 1.0, 2.0]) * sd), 0.001, 0.003, 0.01, 0.03}):
+        w = np.minimum(np.exp(a / beta), args.w_max)
+        rows.append({"beta": float(beta), "beta_over_adv_std": float(beta / sd), "ess_frac": float(w.sum() ** 2 / (w ** 2).sum() / w.size),
+                     "w_max_frac": float((w >= args.w_max).mean()), "w_p90": float(np.quantile(w, 0.9))})
+    info = {"init": str(args.init), "n_scenes": len(rewards), "k": args.k, "m_all_mean": float(np.mean([v["m_all"] for v in rewards.values()])),
+            "reward_mean": float(r.mean()), "reward_std": float(r.std()), "adv_std": sd,
+            "adv_abs_p50_p90_p99": [float(np.quantile(np.abs(a), q)) for q in (0.5, 0.9, 0.99)], "betas": rows, "seconds": seconds}
+    (run_dir / "calibration.json").write_text(json.dumps(info, indent=1) + "\n")
+    print(json.dumps(info, indent=1), flush=True)
+
+
 def finetune(model, rollouts: dict, weights: dict, args) -> list:
     """One epoch of weighted behaviour cloning over all rollouts (fixed seeded order), cosine lr."""
     ds = RolloutScenes(rollouts, weights)
@@ -151,19 +168,24 @@ def main():
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-dir", type=Path, default=None)
+    ap.add_argument("--calibrate", action="store_true",
+                    help="only collect and score (no fine-tune); report advantage and weight statistics per beta")
+    ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
     run_dir = Path(args.run_dir or os.environ["RUN_DIR"])
     (run_dir / "ckpt").mkdir(parents=True, exist_ok=True)
     setup_cuda("fp32")
     set_seed(args.seed * 1000 + args.round)
     t0 = time.time()
-    model = load_model(args.init)
+    model = load_model(args.init, device=args.device)
     scenes = round_scenes(args.round, args.n_scenes)
-    rollouts = collect(model.eval(), scenes, args.k)
+    rollouts = collect(model.eval(), scenes, args.k, device=args.device)
     t_roll = time.time() - t0
     config = wosac.load_config()
-    rewards = mloo_rewards(rollouts, config, "cuda")
+    rewards = mloo_rewards(rollouts, config, args.device)
     t_score = time.time() - t0 - t_roll
+    if args.calibrate:
+        return calibrate(rewards, args, run_dir, {"rollouts": t_roll, "scoring": t_score})
     weights = awr_weights(rewards, args.beta, args.w_max)
     losses = finetune(model, rollouts, weights, args)
     save(run_dir / "ckpt" / "final.pt", model, None, {"round": args.round, "init": str(args.init)})
