@@ -39,7 +39,7 @@ def main() -> int:
         if r.returncode != 0:
             print(r.stdout[-2000:], r.stderr[-4000:])
             return 1
-        m = json.loads((run / "metrics.json").read_text())
+        m = json.loads((run / "metrics_smoke.json").read_text())
         print(f"{head}: loss {loss.item():.3f} realism {m['realism']:.4f} minADE {m['minADE']:.2f} "
               f"({time.time() - t0:.0f} s elapsed)", flush=True)
     elapsed = time.time() - t0

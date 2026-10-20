@@ -80,3 +80,29 @@ def head_comparison(arms: Dict[str, List[Path]], out: Path, refs: Optional[Dict[
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
     plt.close(fig)
+
+
+def baseline_bars(runs: Dict[str, Path], out: Path, title: str = "") -> None:
+    """Model-free baselines on one split: realism and its parts as horizontal bars from zero (one neutral colour;
+    the bars are named on the axis). runs: {"log replay": run dir, ...} with metrics_detail.json."""
+    details = {n: load_detail(r) for n, r in runs.items()}
+    names = list(details)[::-1]
+    fig, axes = plt.subplots(1, 6, figsize=(15, 0.55 * len(names) + 1.6), sharey=True)
+    for ax, (label, key) in zip(axes, [("realism", "realism"), ("kinematic", "kinematic"),
+                                       ("interactive", "interactive"), ("map", "map"),
+                                       ("collision rate", "collision_rate"), ("off-road rate", "offroad_rate")]):
+        _style(ax)
+        ax.yaxis.grid(False)
+        ax.xaxis.grid(True, color=GRID, lw=0.8)
+        vals = [details[n][key] for n in names]
+        ax.barh(range(len(names)), vals, height=0.6, color="#86b6ef", edgecolor="white", linewidth=2)
+        for i, v in enumerate(vals):
+            ax.text(v, i, f" {v:.3f}", va="center", ha="left", fontsize=8, color=INK)
+        ax.set_xlim(0, max(1.0, max(vals) * 1.25))
+        ax.set_title(label, fontsize=9, color=INK)
+    axes[0].set_yticks(range(len(names)), names, fontsize=9)
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)

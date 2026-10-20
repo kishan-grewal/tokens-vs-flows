@@ -150,7 +150,9 @@ class SimAgent(nn.Module):
         return tokenized_map, tokenized_agent, seg
 
     # ----- training -----
-    def loss(self, data) -> Dict[str, Tensor]:
+    def loss(self, data, agent_weight: Optional[Tensor] = None) -> Dict[str, Tensor]:
+        """Behaviour-cloning loss. "sum" is the (optionally per-agent weighted) sum of per-target losses and "count"
+        the number of targets; "loss" = sum / count."""
         tokenized_map, tokenized_agent, seg = self._tokenize(data)
         map_feature = self.map_encoder(tokenized_map)
         pred = self.agent_encoder(tokenized_agent, map_feature)
@@ -165,14 +167,17 @@ class SimAgent(nn.Module):
             ce = F.cross_entropy(pred["next_token_logits"].transpose(1, 2), prob.transpose(1, 2),
                                  reduction="none", label_smoothing=self.cfg.label_smoothing)  # [A, 16]
             mask = pred["next_token_valid"] & target_valid & train_mask[:, None]
-            total = (ce * mask).sum()
+            w = mask.float() if agent_weight is None else mask.float() * agent_weight[:, None]
+            total = (ce * w).sum()
             return {"loss": total / mask.sum().clamp(min=1), "sum": total, "count": mask.sum()}
         h = pred["next_token_logits"]  # [A, 16, hidden]: steps 1..16, actions (10->15) .. (85->90)
         mask = pred["next_token_valid"] & seg["target_valid"][:, 1:-1] & train_mask[:, None]
         agent_type = tokenized_agent["type"].long()[:, None].expand_as(mask)[mask]
         x1 = self.agent_encoder.normalize(seg["target"][:, 1:-1][mask], agent_type)
         per = self.agent_encoder.flow_head.loss(h[mask], x1, n_noise=self.cfg.flow_noise_samples)
-        return {"loss": per.mean(), "sum": per.sum(), "count": mask.sum()}
+        if agent_weight is not None:
+            per = per * agent_weight[:, None].expand_as(mask)[mask]
+        return {"loss": per.sum() / mask.sum().clamp(min=1), "sum": per.sum(), "count": mask.sum()}
 
     # ----- closed-loop rollout -----
     @torch.no_grad()

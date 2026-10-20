@@ -67,7 +67,7 @@ def split_batch(batch, n: int) -> list:
     return [Batch.from_data_list(data[i::n]) for i in range(n) if data[i::n]]
 
 
-def train_step(model, opt, batch, grad_clip: float, amp_dtype=torch.float32):
+def train_step(model, opt, batch, grad_clip: float, amp_dtype=torch.float32, weighted: bool = False):
     """One optimiser step on a CPU batch. If the batch does not fit in GPU memory it is processed in 2, 4, ...
     micro-batches with gradient accumulation; per-target losses are summed and divided by the batch's total
     target count, so the gradient is that of the full batch. Returns (mean loss, grad norm, n micro-batches)."""
@@ -77,8 +77,11 @@ def train_step(model, opt, batch, grad_clip: float, amp_dtype=torch.float32):
             opt.zero_grad(set_to_none=True)
             tot, cnt = 0.0, 0
             for part in (split_batch(batch, n) if n > 1 else [batch]):
+                part = part.cuda(non_blocking=True)
+                # weighted: per-scenario weights (graph attribute "weight") applied to each agent's targets
+                aw = part["weight"][part["agent"]["batch"]] if weighted else None
                 with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
-                    out = model.loss(part.cuda(non_blocking=True))
+                    out = model.loss(part, agent_weight=aw)
                 out["sum"].backward()
                 tot += float(out["sum"].detach())
                 cnt += int(out["count"])
