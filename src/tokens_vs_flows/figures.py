@@ -5,7 +5,7 @@ validated default palette); references (log replay, constant velocity) are neutr
 """
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 
@@ -108,6 +108,93 @@ def baseline_bars(runs: Dict[str, Path], out: Path, title: str = "") -> None:
     plt.close(fig)
 
 
+def operating_points(sweeps: Dict[str, List[Tuple[str, Path]]], out: Path, defaults: Dict[str, str],
+                     refs: Optional[Dict[str, Path]] = None, ceilings: Optional[Dict[str, Path]] = None,
+                     title: str = "") -> None:
+    """Realism and collision rate against rollout diversity (CPD) along each head's sampling knob.
+
+    sweeps: {"token": [("k=16", run dir), ...], "flow": [...]} in knob order; defaults: the configured point's
+    label per arm (ringed); refs: model-free baselines drawn as grey points in the overview; ceilings: replays drawn
+    as dashed horizontal lines. Panels: overview, zoom on the models' best region, collision rate.
+    """
+    pts = {a: [(lab, load_detail(r)) for lab, r in s] for a, s in sweeps.items()}
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.9), gridspec_kw={"width_ratios": [1.15, 1, 1]})
+    best = max(d["realism"] for s in pts.values() for _, d in s)
+    zoom = [(a, lab, d) for a, s in pts.items() for lab, d in s if d["realism"] >= best - 0.06]
+    for k, (ax, key) in enumerate(zip(axes, ["realism", "realism", "collision_rate"])):
+        _style(ax)
+        ax.xaxis.grid(True, color=GRID, lw=0.8)
+        for arm, s in pts.items():
+            c = ARM_COLORS.get(arm, MUTED)
+            x = [d["CPD"] for _, d in s]
+            y = [d[key] for _, d in s]
+            ax.plot(x, y, color=c, lw=2, zorder=2, label=f"{arm} head")
+            ax.scatter(x, y, s=42, color=c, zorder=3, edgecolors="white", linewidths=1.5)
+            for lab, d in s:
+                if lab == defaults.get(arm):
+                    ax.scatter(d["CPD"], d[key], s=150, facecolors="none", edgecolors=INK, linewidths=1.2, zorder=4)
+                if k == 1 or lab == s[-1][0]:
+                    ax.annotate(lab, (d["CPD"], d[key]), xytext=(6, 4), textcoords="offset points", fontsize=7.5,
+                                color=MUTED)
+        if k == 0:
+            for name, r in (refs or {}).items():
+                d = load_detail(r)
+                ax.scatter(d["CPD"], d["realism"], s=30, color="#a3a29e", zorder=3, edgecolors="white", linewidths=1)
+                ax.annotate(name, (d["CPD"], d["realism"]), xytext=(6, 4), textcoords="offset points", fontsize=7.5,
+                            color=MUTED)
+            for name, r in (ceilings or {}).items():
+                v = load_detail(r)["realism"]
+                ax.axhline(v, color=MUTED, lw=1, ls=(0, (4, 3)), zorder=1)
+                ax.text(ax.get_xlim()[1], v, f"{name} {v:.3f}", fontsize=7.5, color=MUTED, ha="right", va="bottom")
+            ax.set_title("realism vs rollout diversity", fontsize=9.5, color=INK)
+            ax.legend(fontsize=8, frameon=False, loc="upper right", bbox_to_anchor=(1.0, 0.86))
+        elif k == 1:
+            xs = [d["CPD"] for _, _, d in zoom]
+            ys = [d["realism"] for _, _, d in zoom]
+            ax.set_xlim(min(xs) - 0.05, max(xs) + 0.12)
+            ax.set_ylim(min(ys) - 0.006, max(ys) + 0.006)
+            ax.set_title("zoom: the best operating points", fontsize=9.5, color=INK)
+        else:
+            ax.set_title("collision rate vs rollout diversity (lower is better)", fontsize=9.5, color=INK)
+        ax.set_xlabel("CPD diversity of the 32 rollouts (higher = more spread)", fontsize=8, color=MUTED)
+        ax.set_ylabel("collision rate" if key == "collision_rate" else "realism meta-metric", fontsize=8,
+                      color=MUTED)
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
+def realism_ladder(entries: List[Tuple[str, List[Path], str]], out: Path, title: str = "") -> None:
+    """Realism of every policy on one axis from zero: models between the model-free floor and the replay ceilings.
+
+    entries: [(label, [run dirs, one per seed], kind)] top to bottom, kind = "token" | "flow" | "ref". A model's bar
+    is its seed mean, with one dot per seed; references are grey.
+    """
+    fig, ax = plt.subplots(figsize=(8.2, 0.42 * len(entries) + 1.3))
+    _style(ax)
+    ax.yaxis.grid(False)
+    ax.xaxis.grid(True, color=GRID, lw=0.8)
+    for i, (label, runs, kind) in enumerate(entries):
+        vals = np.array([load_detail(r)["realism"] for r in runs], dtype=float)
+        c = ARM_COLORS.get(kind, "#c9c8c4")
+        ax.barh(i, vals.mean(), height=0.62, color=c, edgecolor="white", linewidth=2)
+        if len(vals) > 1:
+            ax.scatter(vals, np.full(len(vals), i), s=14, color=INK, zorder=3)
+        ax.text(vals.max() + 0.008, i, f"{vals.mean():.3f}" + (f"  ({len(vals)} seeds)" if len(vals) > 1 else ""),
+                va="center", ha="left", fontsize=8.5, color=INK)
+    ax.set_yticks(range(len(entries)), [e[0] for e in entries], fontsize=9, color=INK)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1.0)
+    ax.set_xlabel("realism meta-metric (WOSAC 2025, higher is better)", fontsize=8.5, color=MUTED)
+    ax.set_title(title, fontsize=10, color=INK, loc="left")
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None:
     """Metrics against fine-tuning round for each head; round 0 is the behaviour-cloned start.
 
@@ -140,3 +227,42 @@ def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
     plt.close(fig)
+
+
+def main():
+    """Rebuild the summary figures from the scored runs in runs/ (only runs that exist are used).
+    Usage: python -m tokens_vs_flows.figures [--sweep-seed 0]"""
+    import argparse
+    from tokens_vs_flows import ROOT
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sweep-seed", type=int, default=0)
+    args = ap.parse_args()
+    runs, figs = ROOT / "runs", ROOT / "figures"
+    seeds = {a: [runs / f"bc_{a}_s{s}" for s in (0, 1, 2) if (runs / f"bc_{a}_s{s}" / "metrics_detail.json").exists()]
+             for a in ("token", "flow")}
+    n = max(len(v) for v in seeds.values())
+    realism_ladder([("log replay (ceiling)", [runs / "eval_log_replay"], "ref"),
+                    ("token replay (vocabulary ceiling)", [runs / "eval_token_replay"], "ref"),
+                    ("token head", seeds["token"], "token"), ("flow head", seeds["flow"], "flow"),
+                    ("noisy constant velocity", [runs / "eval_noisy_actions"], "ref"),
+                    ("constant velocity", [runs / "eval_constant_velocity"], "ref"),
+                    ("random agent", [runs / "eval_random_agent"], "ref")],
+                   figs / "realism_ladder.png",
+                   title="Realism on val_frozen (1000 scenarios, 32 rollouts each)"
+                         + (" — heads: seed 0" if n == 1 else ""))
+    s, b = args.sweep_seed, lambda name: runs / name
+    sweeps = {"token": [("k=16", b(f"bc_token_s{s}_topk16")), ("k=48", b(f"bc_token_s{s}")),
+                        ("k=2048", b(f"bc_token_s{s}_topk2048"))],
+              "flow": [("noise 0.8", b(f"bc_flow_s{s}_noise0.8")), ("noise 1.0", b(f"bc_flow_s{s}")),
+                       ("noise 1.25", b(f"bc_flow_s{s}_noise1.25")), ("noise 1.5", b(f"bc_flow_s{s}_noise1.5"))]}
+    sweeps = {a: [(lab, r) for lab, r in v if (r / "metrics_detail.json").exists()] for a, v in sweeps.items()}
+    operating_points(sweeps, figs / f"sampling_sweeps_s{s}.png", defaults={"token": "k=48", "flow": "noise 1.0"},
+                     refs={"constant velocity": runs / "eval_constant_velocity", "noisy CV": runs / "eval_noisy_actions"},
+                     ceilings={"log replay": runs / "eval_log_replay", "token replay": runs / "eval_token_replay"},
+                     title=f"Sampling knobs trade diversity for realism (seed {s}, val_frozen; ringed = configured point;"
+                           " token: top-k, flow: initial-noise scale)")
+    print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png")
+
+
+if __name__ == "__main__":
+    main()
