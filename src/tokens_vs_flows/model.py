@@ -21,7 +21,7 @@ from omegaconf import OmegaConf
 from torch import Tensor
 
 from tokens_vs_flows import ROOT
-from tokens_vs_flows.actions import ACTION_DIM, clean_trajectories, segment_features, waypoint_contours
+from tokens_vs_flows.actions import ACTION_DIM, clean_trajectories, perturb_anchors, segment_features, waypoint_contours
 from tokens_vs_flows.heads import BinsHead, FlowHead
 from src.smart.metrics.utils import get_euclidean_targets, get_prob_targets
 from src.smart.modules.agent_decoder import SMARTAgentDecoder
@@ -29,6 +29,7 @@ from src.smart.modules.map_decoder import SMARTMapDecoder
 from src.smart.tokens.token_processor import TokenProcessor
 
 ACTION_STATS = Path(__file__).with_name("action_stats.json")
+TOKEN_ERROR = Path(__file__).with_name("token_error.json")
 
 
 @dataclass
@@ -59,6 +60,8 @@ class ModelConfig:
     flow_noise_samples: int = 4
     flow_steps: int = 10
     flow_noise_scale: float = 1.0
+    # continuous arms: training-time history noise matched to the token arm's tokenisation error (token_error.json)
+    hist_noise: bool = False
     # uniform-bins head (factorisation study)
     bins_n: int = 256
     bins_range: float = 5.0
@@ -84,6 +87,29 @@ class ContinuousAgentDecoder(SMARTAgentDecoder):
         stats = json.loads(ACTION_STATS.read_text())
         self.register_buffer("act_mean", torch.tensor([stats[k]["mean"] for k in ("veh", "ped", "cyc")]))
         self.register_buffer("act_std", torch.tensor([stats[k]["std"] for k in ("veh", "ped", "cyc")]))
+        if cfg.hist_noise:
+            # Gaussian match of the token arm's tokenisation error: robust std (MAD) per type x speed bin x (lon, lat,
+            # heading), lag-1 correlation of the bulk per type x dim (token_error.json); empty bins borrow the
+            # nearest lower bin
+            err = json.loads(TOKEN_ERROR.read_text())
+            dims = ("lon", "lat", "head")
+            sig, rho = [], []
+            for k in ("veh", "ped", "cyc"):
+                srows, rrows, last = [], [], None
+                for b in err[k]["by_speed"]:
+                    if all(d in b for d in dims):
+                        # a step-speed error of ~0 means the offset is constant along the steps (parked vehicles)
+                        r = [1.0] * 3 if b.get("speed", {}).get("std_robust", 1.0) < 0.005 else [b[d]["lag1_bulk"] for d in dims]
+                        last = ([b[d]["std_robust"] for d in dims], r)
+                    fallback = ([err[k][d]["std_robust"] for d in dims], [err[k][d]["lag1_bulk"] for d in dims])
+                    srows.append((last or fallback)[0])
+                    rrows.append((last or fallback)[1])
+                sig.append(srows)
+                rho.append(rrows)
+            edges = [b["speed_bin"][0] for b in err["veh"]["by_speed"]] + [err["veh"]["by_speed"][-1]["speed_bin"][1]]
+            self.register_buffer("noise_sigma", torch.tensor(sig))  # [3 types, n_bins, 3 dims]
+            self.register_buffer("noise_rho", torch.tensor(rho).clamp(-0.99, 1.0))  # [3 types, n_bins, 3 dims]
+            self.register_buffer("noise_speed_edges", torch.tensor(edges, dtype=torch.float32))
 
     def normalize(self, action: Tensor, agent_type: Tensor) -> Tensor:
         return (action - self.act_mean[agent_type]) / self.act_std[agent_type]
@@ -182,7 +208,12 @@ class SimAgent(nn.Module):
             traj = clean_trajectories(data["agent"])
         tokenized_map, tokenized_agent = self.token_processor(data)
         if self.cfg.head != "token":
-            seg = segment_features(traj, tokenized_agent["token_agent_shape"])
+            anchors = {}
+            if self.cfg.hist_noise and self.training:
+                enc = self.agent_encoder
+                anchors = dict(zip(("anchor_pos", "anchor_head"), perturb_anchors(
+                    traj, tokenized_agent["type"].long(), enc.noise_sigma, enc.noise_rho, enc.noise_speed_edges)))
+            seg = segment_features(traj, tokenized_agent["token_agent_shape"], **anchors)
             n_agent, n_step = seg["in_valid"].shape
             ta = dict(tokenized_agent)
             idx = torch.arange(n_agent * n_step, device=seg["pos2"].device).view(n_agent, n_step)

@@ -50,10 +50,15 @@ def setup_cuda(precision: str) -> torch.dtype:
     return {"fp32": torch.float32, "bf16": torch.bfloat16}[precision]
 
 
+def _bool(x: str) -> bool:
+    return str(x).lower() in ("1", "true", "yes")
+
+
 def add_model_args(ap: argparse.ArgumentParser) -> None:
     for f in fields(ModelConfig):
         if f.name != "head":
-            ap.add_argument(f"--{f.name.replace('_', '-')}", type=type(f.default), default=f.default)
+            kind = _bool if isinstance(f.default, bool) else type(f.default)
+            ap.add_argument(f"--{f.name.replace('_', '-')}", type=kind, default=f.default)
 
 
 def model_config(args, head: str) -> ModelConfig:
