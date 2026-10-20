@@ -106,3 +106,37 @@ def baseline_bars(runs: Dict[str, Path], out: Path, title: str = "") -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
     plt.close(fig)
+
+
+def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None:
+    """Metrics against fine-tuning round for each head; round 0 is the behaviour-cloned start.
+
+    chains: {"token": [bc run, round-1 run, ...], "flow": [...]} (one seed, or the seed mean if lists of lists).
+    """
+    keys = [("realism", "realism", True), ("kinematic", "kinematic", True), ("interactive", "interactive", True),
+            ("map", "map", True), ("collision rate", "collision_rate", False), ("off-road rate", "offroad_rate", False),
+            ("minADE (m)", "minADE", False), ("CPD diversity", "CPD", None)]
+    fig, axes = plt.subplots(2, 4, figsize=(13, 5.8))
+    for ax, (label, key, better) in zip(axes.flat, keys):
+        _style(ax)
+        for arm, runs in chains.items():
+            seeds = runs if runs and isinstance(runs[0], (list, tuple)) else [runs]
+            n = min(len(s) for s in seeds)
+            vals = np.array([[load_detail(r)[key] for r in s[:n]] for s in seeds], dtype=float)
+            x = np.arange(n)
+            ax.plot(x, vals.mean(0), color=ARM_COLORS.get(arm, MUTED), lw=2, marker="o", ms=5, label=arm)
+            if len(seeds) > 1:
+                ax.fill_between(x, vals.min(0), vals.max(0), color=ARM_COLORS.get(arm, MUTED), alpha=0.15, lw=0)
+            ax.text(x[-1] + 0.1, vals.mean(0)[-1], f"{vals.mean(0)[-1]:.4f}" if key != "minADE" else
+                    f"{vals.mean(0)[-1]:.2f}", fontsize=7.5, va="center", color=INK)
+        arrow = "" if better is None else (" ↑" if better else " ↓")
+        ax.set_title(label + arrow, fontsize=9, color=INK)
+        ax.set_xticks(range(n))
+        ax.set_xlim(-0.2, n - 0.4)
+        ax.set_xlabel("round (0 = BC)", fontsize=8, color=MUTED)
+    axes.flat[0].legend(fontsize=8, frameon=False)
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
