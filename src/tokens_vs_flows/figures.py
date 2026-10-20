@@ -263,6 +263,43 @@ def field_gaps(a_runs: List[Path], b_runs: List[Path], out: Path, labels=("token
     plt.close(fig)
 
 
+def event_timing(runs: Dict[str, Tuple[List[Path], str]], out: Path, title: str = "") -> None:
+    """Share of (rollout, evaluated agent) pairs whose first collision / off-road event happened by time t
+    (runs/<id>/event_timing.json from eval/event_timing.py), one line per policy, seed mean if several runs.
+
+    runs: {"token head": ([run dirs], "token"), "log replay": ([run dir], "ref"), ...}; kind "token" | "flow" takes
+    the arm colour, references are grey with a dash pattern each.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4))
+    dashes = iter([(0, (5, 3)), (0, (1, 2)), (0, (6, 2, 1, 2))])
+    styles = {}
+    for name, (dirs, kind) in runs.items():
+        styles[name] = (ARM_COLORS[kind], "-", 2.0) if kind in ARM_COLORS else ("#8d8c88", next(dashes), 1.5)
+    for ax, key, label in zip(axes, ["collision", "offroad"], ["collision", "off-road"]):
+        _style(ax)
+        ax.xaxis.grid(True, color=GRID, lw=0.8)
+        for name, (dirs, kind) in runs.items():
+            ds = [json.loads((Path(r) / "event_timing.json").read_text()) for r in dirs]
+            t = np.array(ds[0]["t_seconds"])
+            y = np.mean([d["share_with_event_by_t"][key] for d in ds], 0)
+            c, ls, lw = styles[name]
+            ax.plot(t, y, color=c, ls=ls, lw=lw, label=name)
+            ax.annotate(f"{y[-1]:.3f}", (t[-1], y[-1]), xytext=(4, 0), textcoords="offset points", va="center",
+                        fontsize=7.5, color=INK)
+        ax.set_xlim(0, 8.9)
+        ax.set_ylim(0, None)
+        ax.set_xlabel("time since the end of the logged history (s)", fontsize=8, color=MUTED)
+        ax.set_ylabel(f"share of agents with a {label} so far", fontsize=8, color=MUTED)
+        ax.set_title(f"first {label} by time t (32 rollouts x evaluated agents, val_frozen)", fontsize=9.5,
+                     color=INK)
+    axes[0].legend(fontsize=8, frameon=False, loc="upper left")
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None:
     """Metrics against fine-tuning round for each head; round 0 is the behaviour-cloned start.
 
