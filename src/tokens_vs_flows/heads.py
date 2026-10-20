@@ -70,3 +70,55 @@ class FlowHead(nn.Module):
                 t = torch.full((h.shape[0],), i * dt, device=h.device)
                 x = x + dt * self.velocity(x, t, h)
             return x
+
+
+class BinsHead(nn.Module):
+    """Per-coordinate uniform bins over a normalised action (Yi et al.'s discrete regression, sampled).
+
+    Each of the D coordinates gets n_bins uniform bins on [-r, r] (normalised units; values outside go to the edge
+    bins) and is predicted INDEPENDENTLY given h: that independence is where within-action factorisation error comes
+    from. Classifier-free guidance: during training h is replaced by a learned null vector with prob. p_uncond;
+    sampling uses logits (1 + w) cond - w uncond. Decoding returns the sampled bin's centre.
+    """
+
+    def __init__(self, cond_dim: int, action_dim: int = 15, n_bins: int = 256, r: float = 5.0, width: int = 64,
+                 p_uncond: float = 0.1) -> None:
+        super().__init__()
+        self.action_dim, self.n_bins, self.r, self.p_uncond = action_dim, n_bins, r, p_uncond
+        self.mlp = nn.Sequential(nn.Linear(cond_dim, width), nn.LayerNorm(width), nn.ReLU(inplace=True),
+                                 nn.Linear(width, action_dim * n_bins))
+        self.null = nn.Parameter(torch.zeros(cond_dim))
+
+    def logits(self, h: Tensor) -> Tensor:  # [N, D, B]
+        return self.mlp(h).view(-1, self.action_dim, self.n_bins)
+
+    def to_bins(self, x: Tensor) -> Tensor:
+        return ((x + self.r) / (2 * self.r) * self.n_bins).floor().clamp(0, self.n_bins - 1).long()
+
+    def centres(self, z: Tensor) -> Tensor:
+        return (z.float() + 0.5) / self.n_bins * 2 * self.r - self.r
+
+    def loss(self, h: Tensor, x1: Tensor, n_noise: int = 1, generator: Optional[torch.Generator] = None) -> Tensor:
+        """Per-sample CE [N], mean over coordinates; h is replaced by the null vector with prob. p_uncond."""
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            h = h.float()
+            if self.training and self.p_uncond > 0:
+                drop = torch.rand(h.shape[0], device=h.device, generator=generator) < self.p_uncond
+                h = torch.where(drop[:, None], self.null.expand_as(h), h)
+            lg = self.logits(h)
+            ce = nn.functional.cross_entropy(lg.transpose(1, 2), self.to_bins(x1.float()), reduction="none")
+            return ce.mean(-1)
+
+    @torch.no_grad()
+    def guided_logits(self, h: Tensor, cfg_weight: float = 0.0) -> Tensor:
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            lg = self.logits(h.float())
+            if cfg_weight:
+                lg = (1 + cfg_weight) * lg - cfg_weight * self.logits(self.null.expand_as(h.float()))
+            return lg
+
+    @torch.no_grad()
+    def sample(self, h: Tensor, cfg_weight: float = 0.0, generator: Optional[torch.Generator] = None) -> Tensor:
+        p = torch.softmax(self.guided_logits(h, cfg_weight), dim=-1)  # [N, D, B]
+        z = torch.multinomial(p.view(-1, self.n_bins), 1, generator=generator).view(-1, self.action_dim)
+        return self.centres(z)

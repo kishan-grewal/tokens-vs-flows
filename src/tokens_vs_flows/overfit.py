@@ -6,6 +6,7 @@ Pass criteria:
          tokens the CE floor is ~1.09 nats against ~7.6 at init, so a 90% drop would be impossible.
   flow:  primary, teacher-forced 10-step Euler samples land within 0.2 m mean displacement (over the 5 waypoints)
          of the logged 0.5 s action; secondary, eval-mode CFM loss (fixed noise) drops by >= 80%.
+  bins:  as token (eval-mode CE drop >= 90%); teacher-forced sample displacement is reported as well.
 Also renders closed-loop rollouts of 3 of the batch's scenarios. Writes <run>/overfit.json and
 figures/overfit_<head>.png. Run dir defaults to $RUN_DIR.
 """
@@ -43,7 +44,7 @@ def flow_sample_error(model: SimAgent, batch, n_steps: int = 10, seed: int = 123
     mask = pred["next_token_valid"] & seg["target_valid"][:, 1:-1] & batch["agent"]["train_mask"][:, None]
     agent_type = tokenized_agent["type"].long()[:, None].expand_as(mask)[mask]
     enc = model.agent_encoder
-    x = enc.flow_head.sample(h[mask], n_steps=n_steps)
+    x = enc.flow_head.sample(h[mask], n_steps=n_steps) if model.cfg.head == "flow" else enc.bins_head.sample(h[mask])
     wp = enc.denormalize(x, agent_type).view(-1, 5, 3)
     gt = seg["target"][:, 1:-1][mask].view(-1, 5, 3)
     disp = (wp[..., :2] - gt[..., :2]).norm(dim=-1)  # [N, 5]
@@ -54,7 +55,7 @@ def flow_sample_error(model: SimAgent, batch, n_steps: int = 10, seed: int = 123
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--head", choices=["token", "flow"], required=True)
+    ap.add_argument("--head", choices=["token", "flow", "bins"], required=True)
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--lr", type=float, default=5e-4)
@@ -74,7 +75,7 @@ def main():
     batch = next(iter(train_loader(args.batch_size, args.seed, 0, 0, num_workers=2))).cuda()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     l0 = eval_loss(model, batch)
-    s0 = flow_sample_error(model, batch) if args.head == "flow" else None
+    s0 = flow_sample_error(model, batch) if args.head != "token" else None
     t0 = time.time()
     curve = []
     for step in range(1, args.steps + 1):
@@ -91,6 +92,9 @@ def main():
            "n_agents": int(batch["agent"]["num_nodes"]), "loss_init": l0, "loss_final": l1,
            "loss_drop": 1 - l1 / l0, "curve": curve, "seconds": time.time() - t0}
     if args.head == "token":
+        res["pass"] = res["loss_drop"] >= args.token_min_drop
+    elif args.head == "bins":  # categorical head: the token criterion; sample displacement reported too
+        res.update(sample_init=s0, sample_final=flow_sample_error(model, batch))
         res["pass"] = res["loss_drop"] >= args.token_min_drop
     else:
         s1 = flow_sample_error(model, batch)

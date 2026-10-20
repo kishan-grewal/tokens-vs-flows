@@ -45,3 +45,16 @@ def test_fits_a_deterministic_map():
         opt.step()
     err = (head.sample(h, n_steps=20) - x1).norm(dim=-1).mean()
     assert err < 0.25, err
+
+
+def test_bins_roundtrip_and_cfg():
+    from tokens_vs_flows.heads import BinsHead
+    torch.manual_seed(0)
+    head = BinsHead(cond_dim=64, action_dim=15, n_bins=256, r=5.0)
+    x = torch.empty(100, 15).uniform_(-4.9, 4.9)
+    assert (head.centres(head.to_bins(x)) - x).abs().max() <= 5.0 / 256 + 1e-6  # within half a bin
+    h = torch.randn(7, 64)
+    assert head.loss(h, x[:7]).shape == (7,)
+    assert head.sample(h, cfg_weight=2.0).shape == (7, 15)
+    # cfg weight 0 equals the conditional logits
+    assert torch.allclose(head.guided_logits(h, 0.0), head.logits(h))
