@@ -194,6 +194,8 @@ def main():
     ap.add_argument("--run-dir", type=Path, default=None)
     ap.add_argument("--calibrate", action="store_true",
                     help="only collect and score (no fine-tune); report advantage and weight statistics per beta")
+    ap.add_argument("--adv", choices=["mloo", "zero"], default="mloo",
+                    help="zero: control without reward (every rollout weight 1; rewards are not computed)")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
     run_dir = Path(args.run_dir or os.environ["RUN_DIR"])
@@ -205,24 +207,29 @@ def main():
     scenes = round_scenes(args.round, args.n_scenes)
     rollouts = collect(model.eval(), scenes, args.k, device=args.device)
     t_roll = time.time() - t0
-    config = wosac.load_config()
-    rewards = mloo_rewards(rollouts, config, args.device)
+    rewards = None
+    if args.adv == "zero":  # control: the same rollouts and fine-tune with no reward signal
+        weights = {s: [1.0] * args.k for s in rollouts}
+    else:
+        rewards = mloo_rewards(rollouts, wosac.load_config(), args.device)
+        if args.calibrate:
+            return calibrate(rewards, args, run_dir, {"rollouts": t_roll, "scoring": time.time() - t0 - t_roll})
+        weights = awr_weights(rewards, args.beta, args.w_max)
     t_score = time.time() - t0 - t_roll
-    if args.calibrate:
-        return calibrate(rewards, args, run_dir, {"rollouts": t_roll, "scoring": t_score})
-    weights = awr_weights(rewards, args.beta, args.w_max)
     losses = finetune(model, rollouts, weights, args)
     save(run_dir / "ckpt" / "final.pt", model, None, {"round": args.round, "init": str(args.init)})
-    r = np.array([v["r"] for v in rewards.values()])
-    w = np.array([weights[s] for s in rewards])
-    m_all = np.array([v["m_all"] for v in rewards.values()])
-    info = {"round": args.round, "init": str(args.init), "n_scenes": len(scenes), "k": args.k, "beta": args.beta,
-            "w_max": args.w_max, "lr": args.lr, "train_realism_k": float(m_all.mean()),
-            "reward_mean": float(r.mean()), "reward_std": float(r.std()), "adv_std": float((r - r.mean(1, keepdims=True)).std()),
+    w = np.array([weights[s] for s in weights])
+    info = {"round": args.round, "init": str(args.init), "adv": args.adv, "n_scenes": len(scenes), "k": args.k,
+            "beta": args.beta, "w_max": args.w_max, "lr": args.lr,
             "weight_mean": float(w.mean()), "weight_max": float(w.max()), "weight_frac_clipped": float((w >= args.w_max).mean()),
             "ess_frac": float(w.sum() ** 2 / (w ** 2).sum() / w.size),
             "finetune_steps": len(losses), "finetune_loss_first_last": [losses[0], losses[-1]] if losses else None,
             "seconds": {"rollouts": t_roll, "scoring": t_score, "total": time.time() - t0}}
+    if rewards is not None:
+        r = np.array([v["r"] for v in rewards.values()])
+        m_all = np.array([v["m_all"] for v in rewards.values()])
+        info.update(train_realism_k=float(m_all.mean()), reward_mean=float(r.mean()), reward_std=float(r.std()),
+                    adv_std=float((r - r.mean(1, keepdims=True)).std()))
     (run_dir / "round.json").write_text(json.dumps(info, indent=1) + "\n")
     cfg = {**model.cfg.to_dict(), **{k: str(v) for k, v in vars(args).items()}, "seed": args.seed}
     (run_dir / "config.json").write_text(json.dumps(cfg, indent=1) + "\n")
