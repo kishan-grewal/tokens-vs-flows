@@ -1,0 +1,14 @@
+{
+ "sigma": {
+  "veh": 22.063927278645306,
+  "ped": 4.6477352212518666,
+  "cyc": 18.496471522509
+ },
+ "counts": {
+  "veh": 5878744,
+  "ped": 449912,
+  "cyc": 40960
+ },
+ "n_scenarios": 3000,
+ "definition": "Per-type CPD scale sigma_c, fixed on the training split (Flow-ERD leaves the estimator open).\n\nsigma_c = RMS displacement of logged agents of type c from their current position (t = 1.0 s) over the 8 s\nfuture, sum over valid future steps, from 3000 training scenarios (seed 0). Writes eval/cpd_sigma.json."
+}

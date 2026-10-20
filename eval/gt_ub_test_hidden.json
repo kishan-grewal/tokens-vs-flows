@@ -1,0 +1,27 @@
+{
+ "split": "test_hidden",
+ "realism": 0.8311733862461741,
+ "kinematic": 0.5537753992043435,
+ "interactive": 0.8556346473897979,
+ "map": 0.958236312718982,
+ "means": {
+  "metametric": 0.8311733862461741,
+  "average_displacement_error": 0.0,
+  "min_average_displacement_error": 0.0,
+  "linear_speed_likelihood": 0.4726415049135685,
+  "linear_acceleration_likelihood": 0.47706278595328333,
+  "angular_speed_likelihood": 0.5702143778651952,
+  "angular_acceleration_likelihood": 0.6951829280853271,
+  "distance_to_nearest_object_likelihood": 0.4739095526188612,
+  "collision_indication_likelihood": 0.9999688267707825,
+  "time_to_collision_likelihood": 0.8765242990851402,
+  "distance_to_road_edge_likelihood": 0.7122296515107155,
+  "offroad_indication_likelihood": 0.9999688267707825,
+  "traffic_light_violation_likelihood": 0.9955804067775607,
+  "simulated_collision_rate": 0.032417857691645624,
+  "simulated_offroad_rate": 0.10650793831050397,
+  "simulated_traffic_light_violation_rate": 0.007719047762453556,
+  "cpd": 5.421880733196939e-05,
+  "intent_entropy": 0.0
+ }
+}
