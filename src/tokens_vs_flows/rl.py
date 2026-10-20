@@ -95,10 +95,10 @@ class RolloutScenes(Dataset):
     """Each item: a training scene whose future (frames 11..90) is replaced by one closed-loop rollout, with the
     rollout's weight as a graph attribute. Simulated agents exist at every future step."""
 
-    def __init__(self, rollouts: dict, weights: dict) -> None:
+    def __init__(self, rollouts: dict, weights: dict, transform=None) -> None:
         self.items = [(sid, k) for sid in sorted(rollouts) for k in range(rollouts[sid]["states"].shape[0])]
         self.rollouts, self.weights = rollouts, weights
-        super().__init__(transform=WaymoTargetBuilderTrain(32))
+        super().__init__(transform=transform if transform is not None else WaymoTargetBuilderTrain(32))
 
     def len(self) -> int:
         return len(self.items)

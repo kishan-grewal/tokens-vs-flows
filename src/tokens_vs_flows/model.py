@@ -179,6 +179,28 @@ class SimAgent(nn.Module):
             per = per * agent_weight[:, None].expand_as(mask)[mask]
         return {"loss": per.sum() / mask.sum().clamp(min=1), "sum": per.sum(), "count": mask.sum()}
 
+    # ----- policy-gradient inputs -----
+    def policy_inputs(self, data) -> Dict[str, Tensor]:
+        """Teacher-forced pass over (rollout) scenes for policy-gradient updates, all agents, steps 1..16.
+
+        token: "logits" [A, 16, V] and "action" [A, 16] = the token the step's motion re-tokenises to (for a
+        rollout, the sampled token); flow: "h" [A, 16, H] and "action" [A, 16, 15] = the normalised action.
+        "mask" [A, 16] marks steps with a valid start and end. Call in eval mode to switch off dropout.
+        """
+        tokenized_map, tokenized_agent, seg = self._tokenize(data)
+        pred = self.agent_encoder(tokenized_agent, self.map_encoder(tokenized_map))
+        if self.cfg.head == "token":
+            target, target_valid = get_euclidean_targets(
+                pred_pos=pred["pred_pos"], pred_head=pred["pred_head"], pred_valid=pred["pred_valid"],
+                gt_pos=pred["gt_pos_raw"], gt_head=pred["gt_head_raw"], gt_valid=pred["gt_valid_raw"])
+            prob = get_prob_targets(target, tokenized_agent["token_agent_shape"], tokenized_agent["token_traj"])
+            return {"logits": pred["next_token_logits"], "action": prob.argmax(-1),
+                    "mask": pred["next_token_valid"] & target_valid}
+        agent_type = tokenized_agent["type"].long()[:, None].expand(-1, 16)
+        x = self.agent_encoder.normalize(seg["target"][:, 1:-1], agent_type)
+        return {"h": pred["next_token_logits"], "action": x,
+                "mask": pred["next_token_valid"] & seg["target_valid"][:, 1:-1]}
+
     # ----- closed-loop rollout -----
     @torch.no_grad()
     def rollout(self, data, n_rollouts: int = 1) -> Dict[str, Tensor]:
