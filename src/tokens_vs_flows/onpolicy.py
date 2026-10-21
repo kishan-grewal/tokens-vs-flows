@@ -164,7 +164,10 @@ def main():
     ap.add_argument("--kl-target", type=float, default=0.01)
     ap.add_argument("--kl-coef", type=float, default=0.1)
     ap.add_argument("--kl-horizon", type=float, default=5.0)
-    ap.add_argument("--adv", choices=["mloo", "zero"], default="mloo", help="zero: control run without reward")
+    ap.add_argument("--adv", choices=["mloo", "positive", "shuffled", "zero"], default="mloo",
+                    help="positive: max(A, 0) (only better-than-average rollouts are reinforced); shuffled: control "
+                         "without reward signal (advantages permuted across the iteration's rollouts, same statistics); "
+                         "zero: no update at all (the gradient is zero at the reference)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt-every", type=int, default=10)
     ap.add_argument("--run-dir", type=Path, default=None)
@@ -208,7 +211,13 @@ def main():
         r = np.array([rewards[s]["r"] for s in scenes])
         a = r - r.mean(1, keepdims=True)  # centred MLOO (RLFTSim Eq. 2)
         adv_std = float(a.std())
-        a = a / (adv_std + 1e-8) if args.adv == "mloo" else np.zeros_like(a)
+        a = a / (adv_std + 1e-8)
+        if args.adv == "positive":
+            a = np.maximum(a, 0.0)
+        elif args.adv == "shuffled":
+            a = np.random.default_rng(1_000_000 + 1000 * args.seed + it).permutation(a.ravel()).reshape(a.shape)
+        elif args.adv == "zero":
+            a = np.zeros_like(a)
         adv = {s: a[i].tolist() for i, s in enumerate(scenes)}
         ds = RolloutScenes(rollouts, adv, transform=WaymoTargetBuilderVal())
 
