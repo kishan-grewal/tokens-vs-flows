@@ -268,13 +268,18 @@ def event_timing(runs: Dict[str, Tuple[List[Path], str]], out: Path, title: str 
     (runs/<id>/event_timing.json from eval/event_timing.py), one line per policy, seed mean if several runs.
 
     runs: {"token head": ([run dirs], "token"), "log replay": ([run dir], "ref"), ...}; kind "token" | "flow" takes
-    the arm colour, references are grey with a dash pattern each.
+    the arm colour, a variant such as "flow_noise" the arm colour dashed, references are grey with a dash pattern each.
     """
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.4))
     dashes = iter([(0, (5, 3)), (0, (1, 2)), (0, (6, 2, 1, 2))])
     styles = {}
-    for name, (dirs, kind) in runs.items():
-        styles[name] = (ARM_COLORS[kind], "-", 2.0) if kind in ARM_COLORS else ("#8d8c88", next(dashes), 1.5)
+    for name, (dirs, kind) in runs.items():  # kind "flow_noise": a variant of an arm, its colour dashed
+        if kind in ARM_COLORS:
+            styles[name] = (ARM_COLORS[kind], "-", 2.0)
+        elif kind.split("_")[0] in ARM_COLORS:
+            styles[name] = (ARM_COLORS[kind.split("_")[0]], (0, (5, 2)), 2.0)
+        else:
+            styles[name] = ("#8d8c88", next(dashes), 1.5)
     for ax, key, label in zip(axes, ["collision", "offroad"], ["collision", "off-road"]):
         _style(ax)
         ax.xaxis.grid(True, color=GRID, lw=0.8)
