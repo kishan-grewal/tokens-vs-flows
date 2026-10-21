@@ -321,6 +321,66 @@ def event_timing(runs: Dict[str, Tuple[List[Path], str]], out: Path, title: str 
     plt.close(fig)
 
 
+def stopping(runs: Dict[str, Tuple[List[Path], str]], out: Path, title: str = "") -> None:
+    """Agents at rest over the rollout and stop recall (runs/<id>/stopping.json from eval/stopping.py), seed mean.
+
+    runs: {"token head": ([run dirs], "token"), "log replay": ([run dir], "ref"), ...}, styled as in event_timing.
+    Left: share of evaluated agents with speed < 0.5 m/s at each step (from t = 0.2 s: the metric defines no speed at
+    the first simulated step). Right: of the agents the log shows stopped at the end, the share of rollouts that end
+    stopped (stop recall), and of those still moving in the log, the share that end stopped (false stops).
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4), gridspec_kw={"width_ratios": [1.3, 1]})
+    dashes = iter([(0, (5, 3)), (0, (1, 2)), (0, (6, 2, 1, 2))])
+    ax = axes[0]
+    _style(ax)
+    ax.xaxis.grid(True, color=GRID, lw=0.8)
+    bars, placed = [], []
+    for name, (dirs, kind) in runs.items():
+        ds = [json.loads((Path(r) / "stopping.json").read_text()) for r in dirs]
+        if kind in ARM_COLORS:
+            c, ls = ARM_COLORS[kind], "-"
+        elif kind.split("_")[0] in ARM_COLORS:
+            c, ls = ARM_COLORS[kind.split("_")[0]], (0, (5, 2))
+        else:
+            c, ls = "#8d8c88", next(dashes)
+        t = np.array(ds[0]["t_seconds"])[1:]
+        y = np.mean([d["stopped_by_t"] for d in ds], 0)[1:]
+        ax.plot(t, y, color=c, ls=ls, lw=2.0 if kind != "ref" else 1.5, label=name)
+        if all(abs(y[-1] - q) > 0.004 for q in placed):  # skip a label that would overprint another
+            ax.annotate(f"{y[-1]:.3f}", (t[-1], y[-1]), xytext=(4, 0), textcoords="offset points", va="center",
+                        fontsize=7.5, color=INK)
+            placed.append(y[-1])
+        bars.append((name, c, [d["stop_recall"] for d in ds], [d["false_stop"] for d in ds]))
+    ax.set_xlim(0, 8.6)
+    ax.set_ylim(0, None)
+    ax.set_xlabel("time since the end of the logged history (s)", fontsize=8, color=MUTED)
+    ax.set_ylabel("share of evaluated agents at rest (< 0.5 m/s)", fontsize=8, color=MUTED)
+    ax.set_title("agents at rest over the rollout", fontsize=9.5, color=INK)
+    ax.legend(fontsize=8, frameon=False, loc="lower left")
+    ax = axes[1]
+    _style(ax)
+    ax.yaxis.grid(False)
+    ax.xaxis.grid(True, color=GRID, lw=0.8)
+    for i, (name, c, rec, fs) in enumerate(bars):
+        for j, (vals, alpha, lab) in enumerate([(rec, 1.0, "stop recall"), (fs, 0.45, "false stops")]):
+            y = i + (j - 0.5) * 0.36
+            ax.barh(y, np.mean(vals), height=0.34, color=c, alpha=alpha, edgecolor="white", linewidth=1.5,
+                    label=lab if i == 0 else None)
+            if len(vals) > 1:
+                ax.scatter(vals, np.full(len(vals), y), s=10, color=INK, zorder=3)
+            ax.text(np.max(vals) + 0.01, y, f"{np.mean(vals):.2f}", va="center", fontsize=7.5, color=INK)
+    ax.set_yticks(range(len(bars)), [b[0] for b in bars], fontsize=8.5, color=INK)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1.12)
+    ax.set_xlabel("share of rollouts that end stopped (t = 7.0-7.9 s)", fontsize=8, color=MUTED)
+    ax.set_title("stop recall (solid) and false stops (light)", fontsize=9.5, color=INK)
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None:
     """Metrics against fine-tuning round for each head; round 0 is the behaviour-cloned start.
 
