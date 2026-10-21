@@ -551,7 +551,10 @@ def main():
                  ("flow: FPO run 1, 100 iterations", runs / f"fpo_flow_noise_s{s}", "flow_rl"),
                  ("flow: FPO run 2, 30 iterations", runs / f"fpo_clip0.01_flow_noise_s{s}", "flow_rl"),
                  ("flow: FPO run 2, 100 iterations", runs / f"fpo_rerun_flow_noise_s{s}", "flow_rl"),
-                 ("flow: FPO control (shuffled advantages)", runs / f"fpo_shuffled_flow_noise_s{s}", "flow_ctrl")]
+                 ("flow: FPO control (shuffled advantages)", runs / f"fpo_shuffled_flow_noise_s{s}", "flow_ctrl"),
+                 ("flow: FPO + velocity anchor, 30 iterations", runs / f"fpo_vanchor10_flow_noise_s{s}", "flow_rl"),
+                 ("flow: FPO + velocity anchor, 100 iterations", runs / f"fpo_anchored_flow_noise_s{s}", "flow_rl"),
+                 ("flow: anchored control (shuffled)", runs / f"fpo_anchored_shuffled_flow_noise_s{s}", "flow_ctrl")]
     behaviour = [r for r in behaviour if all((r[1] / f).exists() for f in ("metrics.json", "stopping.json", "jitter.json"))]
     rl_behaviour(behaviour, figs / f"rl_behaviour_s{s}.png",
                  title=f"What reward fine-tuning changed (seed {s}, val_frozen; both FPO runs use identical settings)")
