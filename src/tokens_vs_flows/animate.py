@@ -6,6 +6,7 @@ The ego vehicle is green; boxes that overlap another box are red (a collision).
 Usage: python -m tokens_vs_flows.animate --runs runs/bc_token_s0 runs/bc_flow_s0 --labels "token head" "flow head" \
            --scenario <id> [--out figures/rollouts_<id>.gif]
        python -m tokens_vs_flows.animate --runs ... --labels ... --pick 3   # the 3 busiest val_frozen scenarios
+       python -m tokens_vs_flows.animate --runs ... --labels ... --pick 1 --by turning   # the most turning agents
 """
 import argparse
 import pickle
@@ -164,16 +165,16 @@ def shrink_gif(path: Path, duration_ms: int, colors: int = 96) -> None:
     q[0].save(path, save_all=True, append_images=q[1:], duration=duration_ms, loop=0, optimize=True, disposal=1)
 
 
-def busiest(split: str, n: int):
+def busiest(split: str, n: int, by: str = "busy"):
     """The n scenarios of the split with the most interaction: simulated agents that turn (heading change > 0.8 rad
-    while moving > 10 m in the log) count 3, other agents moving > 10 m count 1. Chosen from the log alone, never
-    from any model's rollouts or scores."""
+    while moving > 10 m in the log) count 3, other agents moving > 10 m count 1; by="turning" ranks by the number of
+    turning agents first (ties by that score). Chosen from the log alone, never from any model's rollouts or scores."""
     score = []
     for sid in read_split(split):
         gt = load_gt(sid)
         rows = np.flatnonzero(np.isin(gt["object_ids"].numpy(), gt["sim_agent_ids"].numpy()))
         tr, m = gt["tracks"].numpy()[rows], gt["track_masks"].numpy()[rows]
-        total = 0
+        total = turning = 0
         for a in range(len(rows)):
             if m[a].sum() < 2:
                 continue
@@ -181,7 +182,8 @@ def busiest(split: str, n: int):
             moved = np.linalg.norm(xy[-1] - xy[0]) > 10
             turned = abs(np.angle(np.exp(1j * (h[-1] - h[0])))) > 0.8
             total += 3 if (moved and turned) else int(moved)
-        score.append((total, sid))
+            turning += int(moved and turned)
+        score.append(((turning, total) if by == "turning" else (total,), sid))
     return [sid for _, sid in sorted(score, reverse=True)[:n]]
 
 
@@ -191,10 +193,11 @@ def main():
     ap.add_argument("--labels", nargs="+", required=True)
     ap.add_argument("--scenario", default=None)
     ap.add_argument("--pick", type=int, default=0, help="animate the N busiest val_frozen scenarios")
+    ap.add_argument("--by", default="busy", choices=["busy", "turning"], help="ranking used by --pick")
     ap.add_argument("--rollout", type=int, default=0)
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
-    sids = [args.scenario] if args.scenario else busiest("val_frozen", args.pick)
+    sids = [args.scenario] if args.scenario else busiest("val_frozen", args.pick, args.by)
     for sid in sids:
         animate(sid, args.runs, args.labels, args.out or ROOT / "figures" / f"rollouts_{sid}.gif", args.rollout)
 
