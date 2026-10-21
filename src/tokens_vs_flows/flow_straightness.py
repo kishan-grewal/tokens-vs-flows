@@ -10,7 +10,8 @@ with 200 steps (the reference x_ref). Per model:
   end_err_m     mean distance (m) between the k-step and the reference end waypoint (0.5 s ahead), denormalised,
   accel_err     RMS difference (m/s^2) of the accelerations inside the action (second differences of the 5
                 waypoints at 10 Hz, from the agent's current position), k-step vs reference; accel_rms is the RMS of
-                those accelerations in the reference samples (how jerky the flow's own actions are).
+                those accelerations in the reference samples (how jerky the flow's own actions are),
+  straightness_by_t   the straightness in 20 bins of t (where along the path the flow bends).
 Writes runs/<id>/flow_straightness.json.
 Usage: python -m tokens_vs_flows.flow_straightness --run runs/<id> [runs/<id> ...] [--n-scenes 8] [--device cpu]
 """
@@ -26,6 +27,7 @@ from tokens_vs_flows.rollout import load_model
 
 STEPS = (1, 2, 5, 10, 20, 50)
 N_REF = 200
+N_BINS = 20  # of t, for straightness_by_t
 
 
 def in_action_accel(action: torch.Tensor) -> torch.Tensor:
@@ -78,7 +80,8 @@ def measure(run: Path, n_scenes: int, n_ctx: int, device: str) -> dict:
     out = {"run": str(run), "n_contexts": int(h.shape[0]), "n_scenes": n_scenes,
            "straightness": float(dev.mean()), "straightness_t_lt_0.2": float(dev[:N_REF // 5].mean()),
            "straightness_t_gt_0.8": float(dev[-N_REF // 5:].mean()),
-           "accel_rms": float(acc_ref.pow(2).sum(-1).mean().sqrt()), "err": {}, "end_err_m": {}, "accel_err": {}}
+           "accel_rms": float(acc_ref.pow(2).sum(-1).mean().sqrt()), "err": {}, "end_err_m": {}, "accel_err": {},
+           "straightness_by_t": [round(float(d), 5) for d in dev.view(N_BINS, -1).mean(1)]}
     for k in STEPS:
         xk = head.sample(h, n_steps=k, x0=x0)
         out["err"][k] = float((xk - x_ref).pow(2).mean(-1).sqrt().mean())

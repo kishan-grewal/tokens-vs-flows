@@ -460,6 +460,40 @@ def rl_behaviour(rows: List[Tuple[str, Path, str]], out: Path, title: str = "") 
     plt.close(fig)
 
 
+def flow_straightness(rows: List[Tuple[str, Path, str]], out: Path, title: str = "") -> None:
+    """Where along the sampling path each flow model departs from straight paths (runs/<id>/flow_straightness.json
+    from `python -m tokens_vs_flows.flow_straightness`): mean ||v(x_t, t) - (x_1 - x_0)||^2 per normalised dim over
+    a 200-step solve, in 20 bins of t (0 everywhere = straight flow, one Euler step exact), log scale.
+
+    rows: [(label, run dir, style)], style "bc" (behaviour cloning, light), "rl" (fine-tuned, full colour), "rl2"
+    (a second fine-tuned run, dash-dot), "ctrl" (shuffled-advantage control, dashed) or "fix" (fine-tuned with the
+    velocity anchor, dark). The legend gives each model's mean over t.
+    """
+    base = np.array([int(ARM_COLORS["flow"][i:i + 2], 16) for i in (1, 3, 5)], dtype=float)
+    hexc = lambda rgb: "#" + "".join(f"{int(round(v)):02x}" for v in rgb)
+    styles = {"bc": (hexc(base + (255 - base) * 0.5), "-", 3.0), "rl": (ARM_COLORS["flow"], "-", 1.8),
+              "rl2": (ARM_COLORS["flow"], (0, (6, 2, 1, 2)), 1.8), "ctrl": (ARM_COLORS["flow"], (0, (4, 2)), 1.8),
+              "fix": (hexc(base * 0.55), "-", 1.6)}
+    fig, ax = plt.subplots(figsize=(7.4, 4.4))
+    _style(ax)
+    for label, run, style in rows:
+        d = json.loads((Path(run) / "flow_straightness.json").read_text())
+        color, ls, lw = styles[style]
+        by_t = np.array(d["straightness_by_t"])
+        ax.plot((np.arange(len(by_t)) + 0.5) / len(by_t), by_t, color=color, ls=ls, lw=lw,
+                label=f"{label} (mean {d['straightness']:.3f})")
+    ax.set_yscale("log")
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("flow time t (0 = noise, 1 = sample)", fontsize=8.5, color=MUTED)
+    ax.set_ylabel("departure from a straight path\n(per normalised action dim)", fontsize=8.5, color=MUTED)
+    ax.legend(fontsize=7.5, frameon=False, loc="upper center")
+    ax.set_title(title, fontsize=9.5, color=INK, loc="left")
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def _ramp(hex_color: str, n: int) -> List[str]:
     """n steps of one hue from light to full (blended with white), for an ordered knob such as the clip range."""
     rgb = np.array([int(hex_color[i:i + 2], 16) for i in (1, 3, 5)], dtype=float)
@@ -558,8 +592,20 @@ def main():
     behaviour = [r for r in behaviour if all((r[1] / f).exists() for f in ("metrics.json", "stopping.json", "jitter.json"))]
     rl_behaviour(behaviour, figs / f"rl_behaviour_s{s}.png",
                  title=f"What reward fine-tuning changed (seed {s}, val_frozen; both FPO runs use identical settings)")
+    anchored = runs / f"fpo_anchored_flow_noise_s{s}"
+    rows = [("behaviour cloning", runs / f"bc_flow_noise_s{s}", "bc"),
+            ("FPO run 1, 100 iterations", runs / f"fpo_flow_noise_s{s}", "rl"),
+            ("FPO run 2, 100 iterations", runs / f"fpo_rerun_flow_noise_s{s}", "rl2"),
+            ("FPO control (shuffled advantages)", runs / f"fpo_shuffled_flow_noise_s{s}", "ctrl"),
+            ("FPO + velocity anchor, " + ("100" if (anchored / "flow_straightness.json").exists() else "30")
+             + " iterations", anchored if (anchored / "flow_straightness.json").exists()
+             else runs / f"fpo_vanchor10_flow_noise_s{s}", "fix")]
+    flow_straightness([r for r in rows if (r[1] / "flow_straightness.json").exists()],
+                      figs / f"flow_straightness_s{s}.png",
+                      title=f"FPO bends the flow head's sampling paths, with or without reward;\nthe velocity anchor "
+                            f"keeps them as straight as behaviour cloning's (seed {s})")
     print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png", figs / "field_gaps_token_vs_flow.png",
-          figs / f"rl_behaviour_s{s}.png")
+          figs / f"rl_behaviour_s{s}.png", figs / f"flow_straightness_s{s}.png")
 
 
 if __name__ == "__main__":
