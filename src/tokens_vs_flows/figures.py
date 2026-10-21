@@ -419,7 +419,7 @@ def rl_behaviour(rows: List[Tuple[str, Path, str]], out: Path, title: str = "") 
     """What reward fine-tuning changed in the simulated behaviour, one bar per policy and the log as reference.
 
     rows: [(label, run dir, kind)], kind "ref" (log replay, grey), an arm ("token" / "flow": behaviour-cloned start,
-    light) or "<arm>_rl" (fine-tuned, full colour). Panels: realism (metrics.json), collision rate, false stops
+    light), "<arm>_rl" (fine-tuned, full colour) or "<arm>_ctrl" (shuffled-advantage control, hatched). Panels: realism (metrics.json), collision rate, false stops
     (agents moving at > 2 m/s at the end of the log whose rollout ends stopped; runs/<id>/stopping.json) and jerky
     motion (share of 10 Hz frames inside actions with acceleration > 4 m/s^2; runs/<id>/jitter.json). Dotted lines
     mark the log's own level.
@@ -441,8 +441,12 @@ def rl_behaviour(rows: List[Tuple[str, Path, str]], out: Path, title: str = "") 
             vals.append(v)
             if kind == "ref":
                 ax.axvline(v, color="#8d8c88", ls=(0, (1, 2)), lw=1.2, zorder=1)
-            ax.barh(i, v, height=0.62, color=ARM_COLORS.get(arm, "#8d8c88"), alpha=1.0 if kind.endswith("_rl") or
-                    kind == "ref" else 0.45, edgecolor="white", linewidth=1.5, zorder=2)
+            c = ARM_COLORS.get(arm, "#8d8c88")
+            if kind.endswith("_ctrl"):
+                ax.barh(i, v, height=0.62, color="white", hatch="////", edgecolor=c, linewidth=1.0, zorder=2)
+            else:
+                ax.barh(i, v, height=0.62, color=c, alpha=1.0 if kind.endswith("_rl") or kind == "ref" else 0.45,
+                        edgecolor="white", linewidth=1.5, zorder=2)
             ax.text(v, i, f" {v:.3f}", va="center", fontsize=7.5, color=INK, zorder=3)
         lo = min(vals) - 0.15 * (max(vals) - min(vals)) if "realism" in name else 0.0
         ax.set_xlim(lo, max(vals) + 0.22 * (max(vals) - lo))
@@ -542,10 +546,12 @@ def main():
     behaviour = [("log replay", runs / "eval_log_replay", "ref"),
                  ("token: behaviour cloning", runs / f"bc_token_s{s}", "token"),
                  ("token: PPO, 100 iterations", runs / f"ppo_token_s{s}", "token_rl"),
+                 ("token: PPO control (shuffled advantages)", runs / f"ppo_shuffled_token_s{s}", "token_ctrl"),
                  ("flow (history noise): behaviour cloning", runs / f"bc_flow_noise_s{s}", "flow"),
                  ("flow: FPO run 1, 100 iterations", runs / f"fpo_flow_noise_s{s}", "flow_rl"),
                  ("flow: FPO run 2, 30 iterations", runs / f"fpo_clip0.01_flow_noise_s{s}", "flow_rl"),
-                 ("flow: FPO run 2, 100 iterations", runs / f"fpo_rerun_flow_noise_s{s}", "flow_rl")]
+                 ("flow: FPO run 2, 100 iterations", runs / f"fpo_rerun_flow_noise_s{s}", "flow_rl"),
+                 ("flow: FPO control (shuffled advantages)", runs / f"fpo_shuffled_flow_noise_s{s}", "flow_ctrl")]
     behaviour = [r for r in behaviour if all((r[1] / f).exists() for f in ("metrics.json", "stopping.json", "jitter.json"))]
     rl_behaviour(behaviour, figs / f"rl_behaviour_s{s}.png",
                  title=f"What reward fine-tuning changed (seed {s}, val_frozen; both FPO runs use identical settings)")
