@@ -225,10 +225,12 @@ def per_scenario(runs: List[Path]) -> Dict[str, np.ndarray]:
 
 
 def field_gaps(a_runs: List[Path], b_runs: List[Path], out: Path, labels=("token", "flow"), title: str = "",
-               n_boot: int = 10000) -> None:
+               n_boot: int = 10000, colors: Dict[str, str] = None) -> None:
     """Where the realism gap between two arms comes from: per WOSAC field, the paired per-scenario difference
     b - a of the likelihood (left) and its weighted contribution to the meta-metric difference (right), with 95%
-    bootstrap intervals over scenarios. Dots take the colour of the arm that is better on that field."""
+    bootstrap intervals over scenarios. Dots take the colour of the arm that is better on that field (colors maps
+    each label to a colour; default ARM_COLORS)."""
+    colors = colors or ARM_COLORS
     import sys
     from tokens_vs_flows import ROOT
     sys.path.insert(0, str(ROOT / "eval"))
@@ -252,25 +254,25 @@ def field_gaps(a_runs: List[Path], b_runs: List[Path], out: Path, labels=("token
             d = (b[key] - a[key]) * (w if k == 1 else 1.0)
             boot = d[idx].mean(1)
             lo, hi = np.percentile(boot, [2.5, 97.5])
-            c = ARM_COLORS.get(labels[1] if d.mean() > 0 else labels[0], MUTED)
+            c = colors.get(labels[1] if d.mean() > 0 else labels[0], MUTED)
             ax.plot([lo, hi], [i, i], color=c, lw=2, solid_capstyle="round")
             ax.scatter(d.mean(), i, s=46 if i else 70, color=c, zorder=3, edgecolors="white", linewidths=1.5)
             ax.annotate(f"{d.mean():+.4f}", (hi, i), xytext=(6, 0), textcoords="offset points", va="center",
                         fontsize=7.5, color=INK)
-        ax.set_title(("likelihood difference" if k == 0 else "weighted contribution to the realism difference")
-                     + f" ({labels[1]} − {labels[0]})", fontsize=9.5, color=INK)
+        ax.set_title("likelihood difference" if k == 0 else "weighted contribution to the realism difference",
+                     fontsize=9.5, color=INK)
         xl = ax.get_xlim()
         ax.set_xlim(xl[0], xl[1] + 0.25 * (xl[1] - xl[0]))
-    for arm in labels:
-        axes[1].scatter([], [], s=46, color=ARM_COLORS.get(arm, MUTED), label=f"{arm} better")
-    axes[1].legend(fontsize=8, frameon=False, loc="upper right")
+    handles = [axes[1].scatter([], [], s=46, color=colors.get(arm, MUTED), label=f"{arm} better") for arm in labels]
+    fig.legend(handles=handles, fontsize=8.5, frameon=False, loc="lower center", ncol=2)
     names = [r[0] + (f"  [{r[3]}, w {r[2]:.2f}]" if r[3] else "") for r in rows]
     axes[0].set_yticks(range(len(rows)), names, fontsize=8.5, color=INK)
     axes[0].invert_yaxis()
-    fig.suptitle(title or f"Per-field realism gap, paired over {n} val_frozen scenarios (seeds: {labels[0]} "
-                          f"{len(a_runs)}, {labels[1]} {len(b_runs)}); colour = the better arm on that field",
+    fig.suptitle((title or f"Per-field realism gap, paired over {n} val_frozen scenarios (seeds: {labels[0]} "
+                           f"{len(a_runs)}, {labels[1]} {len(b_runs)})")
+                 + f"\ndifferences are {labels[1]} − {labels[0]}; colour = the better one on that field",
                  fontsize=10, color=INK)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
     plt.close(fig)
@@ -651,6 +653,13 @@ def main():
                      title=f"Sampling knobs trade diversity for realism (seed {s}, val_frozen; ringed = configured point;"
                            " token: top-k, flow: initial-noise scale)")
     field_gaps(seeds["token"], seeds["flow"], figs / "field_gaps_token_vs_flow.png")
+    frozen = runs / f"fpo_clip0.01_flow_noise_s{s}"
+    if (frozen / "per_scenario.csv").exists():
+        field_gaps([runs / f"bc_flow_noise_s{s}"], [frozen], figs / f"field_gaps_freezing_s{s}.png",
+                   labels=("behaviour cloning", "after 30 FPO iterations"),
+                   colors={"behaviour cloning": MUTED, "after 30 FPO iterations": ARM_COLORS["flow"]},
+                   title=f"Where the traffic-freezing run's realism gain comes from (flow head with history noise, "
+                         f"seed {s}, paired over 1000 val_frozen scenarios)")
     behaviour = [("log replay", runs / "eval_log_replay", "ref"),
                  ("token: behaviour cloning", runs / f"bc_token_s{s}", "token"),
                  ("token: PPO, 100 iterations", runs / f"ppo_token_s{s}", "token_rl"),
@@ -692,6 +701,7 @@ def main():
                       title=f"FPO bends the flow head's sampling paths, with or without reward;\nthe velocity anchor "
                             f"keeps them as straight as behaviour cloning's (seed {s})")
     print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png", figs / "field_gaps_token_vs_flow.png",
+          figs / f"field_gaps_freezing_s{s}.png",
           figs / f"rl_behaviour_s{s}.png", figs / f"flow_straightness_s{s}.png", figs / f"anchor_study_s{s}.png")
 
 
