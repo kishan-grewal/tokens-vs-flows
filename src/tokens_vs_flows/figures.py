@@ -110,17 +110,21 @@ def baseline_bars(runs: Dict[str, Path], out: Path, title: str = "") -> None:
 
 def operating_points(sweeps: Dict[str, List[Tuple[str, Path]]], out: Path, defaults: Dict[str, str],
                      refs: Optional[Dict[str, Path]] = None, ceilings: Optional[Dict[str, Path]] = None,
-                     title: str = "") -> None:
+                     title: str = "", extra: Optional[Dict[str, List[Tuple[str, Path]]]] = None,
+                     extra_label: str = "other policies") -> None:
     """Realism and collision rate against rollout diversity (CPD) along each head's sampling knob.
 
     sweeps: {"token": [("k=16", run dir), ...], "flow": [...]} in knob order; defaults: the configured point's
     label per arm (ringed); refs: model-free baselines drawn as grey points in the overview; ceilings: replays drawn
-    as dashed horizontal lines. Panels: overview, zoom on the models' best region, collision rate.
+    as dashed horizontal lines; extra: other policies of each arm (e.g. fine-tuned ones) drawn as diamonds, so a
+    point above its arm's curve beats every sampling setting of that diversity. Panels: overview, zoom on the
+    models' best region, collision rate.
     """
     pts = {a: [(lab, load_detail(r)) for lab, r in s] for a, s in sweeps.items()}
+    ext = {a: [(lab, load_detail(r)) for lab, r in s] for a, s in (extra or {}).items()}
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.9), gridspec_kw={"width_ratios": [1.15, 1, 1]})
     best = max(d["realism"] for s in pts.values() for _, d in s)
-    zoom = [(a, lab, d) for a, s in pts.items() for lab, d in s if d["realism"] >= best - 0.06]
+    zoom = [(a, lab, d) for src in (pts, ext) for a, s in src.items() for lab, d in s if d["realism"] >= best - 0.06]
     for k, (ax, key) in enumerate(zip(axes, ["realism", "realism", "collision_rate"])):
         _style(ax)
         ax.xaxis.grid(True, color=GRID, lw=0.8)
@@ -136,6 +140,15 @@ def operating_points(sweeps: Dict[str, List[Tuple[str, Path]]], out: Path, defau
                 if k == 1 or lab == s[-1][0]:
                     ax.annotate(lab, (d["CPD"], d[key]), xytext=(6, 4), textcoords="offset points", fontsize=7.5,
                                 color=MUTED)
+        for arm, s in ext.items():
+            for lab, d in s:
+                ax.scatter(d["CPD"], d[key], s=58, marker="D", color=ARM_COLORS.get(arm, MUTED), zorder=5,
+                           edgecolors=INK, linewidths=0.8)
+                if k > 0:
+                    ax.annotate(lab, (d["CPD"], d[key]), xytext=(7, -11), textcoords="offset points", fontsize=7.5,
+                                color=INK)
+        if k == 0 and ext:
+            ax.scatter([], [], s=58, marker="D", color="white", edgecolors=INK, linewidths=0.8, label=extra_label)
         if k == 0:
             for name, r in (refs or {}).items():
                 d = load_detail(r)
@@ -364,10 +377,10 @@ def main():
                    title="Realism on val_frozen (1000 scenarios, 32 rollouts each)"
                          + (" — heads: seed 0" if n == 1 else ""))
     s, b = args.sweep_seed, lambda name: runs / name
-    sweeps = {"token": [("k=16", b(f"bc_token_s{s}_topk16")), ("k=48", b(f"bc_token_s{s}")),
-                        ("k=2048", b(f"bc_token_s{s}_topk2048"))],
-              "flow": [("noise 0.8", b(f"bc_flow_s{s}_noise0.8")), ("noise 1.0", b(f"bc_flow_s{s}")),
-                       ("noise 1.25", b(f"bc_flow_s{s}_noise1.25")), ("noise 1.5", b(f"bc_flow_s{s}_noise1.5"))]}
+    sweeps = {"token": [(f"k={k}", b(f"bc_token_s{s}" if k == 48 else f"bc_token_s{s}_topk{k}"))
+                        for k in (8, 16, 24, 32, 48, 2048)],
+              "flow": [(f"noise {v}", b(f"bc_flow_s{s}" if v == "1.0" else f"bc_flow_s{s}_noise{v}"))
+                       for v in ("0.8", "0.9", "1.0", "1.25", "1.5")]}
     sweeps = {a: [(lab, r) for lab, r in v if (r / "metrics_detail.json").exists()] for a, v in sweeps.items()}
     operating_points(sweeps, figs / f"sampling_sweeps_s{s}.png", defaults={"token": "k=48", "flow": "noise 1.0"},
                      refs={"constant velocity": runs / "eval_constant_velocity", "noisy CV": runs / "eval_noisy_actions"},
