@@ -12,6 +12,9 @@ Each iteration, from the current policy (the "old" policy of the iteration):
        r = exp(log pi_theta(a) - log pi_old(a))        (token: exact; flow: FPO ratio on the stored draws)
        k3 = rho - 1 - log rho, rho = pi_BC(a) / pi_theta(a)   (anchor to BC in each arm's own likelihood)
      with dropout off; kl_coef adapts to a common target (Ziegler-style, both arms).
+     Optional for flow (--v-anchor w > 0): + w * ||v_theta - v_BC||^2 at the stored draws (summed over dims, mean
+     over draws), an anchor on the velocity field itself. Unlike the eps-form likelihood, which weights each draw by
+     t^2, it is not down-weighted near t = 0, where sampling starts.
 Usage: python -m tokens_vs_flows.onpolicy --init runs/bc_flow_s0 --iters 100 [--scenes 32 --k 4 --epochs 4 ...]
 Writes <run>/ckpt/final.pt, <run>/iters.csv (per-iteration statistics) and <run>/config.json.
 """
@@ -44,13 +47,20 @@ def token_logp(logits, action, support):
     return torch.where(hit.any(-1), (sub * hit).sum(-1), torch.full_like(sub[:, 0], -math.inf))
 
 
-def flow_draw_losses(head, h, x1, t, eps):
-    """Per-draw eps-form losses [N, M] for actions x1 [N, D] given h [N, H], draws t [N, M], eps [N, M, D]."""
+def flow_draw_losses(head, h, x1, t, eps, return_v: bool = False):
+    """Per-draw eps-form losses [N, M] for actions x1 [N, D] given h [N, H], draws t [N, M], eps [N, M, D]
+    (and the velocities [N, M, D] at the draws if return_v)."""
     n, m, d = eps.shape
     with torch.autocast(device_type=h.device.type, enabled=False):
         x_t = (1 - t)[..., None] * eps + t[..., None] * x1[:, None]
         v = head.velocity(x_t.reshape(n * m, d), t.reshape(-1), h.float().repeat_interleave(m, 0)).view(n, m, d)
-        return (t[..., None] ** 2 * (v - (x1[:, None] - eps)) ** 2).sum(-1)
+        loss = (t[..., None] ** 2 * (v - (x1[:, None] - eps)) ** 2).sum(-1)
+        return (loss, v) if return_v else loss
+
+
+def velocity_anchor(v, v_ref):
+    """Per-action anchor [N] on the velocity field: ||v - v_ref||^2 summed over dims, mean over the draws."""
+    return (v - v_ref).pow(2).sum(-1).mean(-1)
 
 
 def batches(n_items: int, size: int, gen: torch.Generator):
@@ -58,9 +68,10 @@ def batches(n_items: int, size: int, gen: torch.Generator):
     return [perm[i:i + size] for i in range(0, n_items, size)]
 
 
-def action_quantities(model, out, store=None, n_mc=8, gen=None):
+def action_quantities(model, out, store=None, n_mc=8, gen=None, with_v=False):
     """log pi(a) per masked action for one teacher-forced pass `out` (policy_inputs). For the token arm the support
-    comes from `store` (old policy) or is created here (top-k of these logits); for flow the draws likewise."""
+    comes from `store` (old policy) or is created here (top-k of these logits); for flow the draws likewise, and
+    with_v adds the velocities at the draws."""
     m = out["mask"]
     if model.cfg.head == "token":
         logits = out["logits"][m]
@@ -73,8 +84,8 @@ def action_quantities(model, out, store=None, n_mc=8, gen=None):
     else:
         t = torch.rand(x1.shape[0], n_mc, device=h.device, generator=gen)
         eps = torch.randn(x1.shape[0], n_mc, x1.shape[1], device=h.device, generator=gen)
-    loss = flow_draw_losses(model.agent_encoder.flow_head, h, x1, t, eps)
-    return {"logp": -loss.mean(-1), "t": t, "eps": eps}
+    loss, v = flow_draw_losses(model.agent_encoder.flow_head, h, x1, t, eps, return_v=True)
+    return {"logp": -loss.mean(-1), "t": t, "eps": eps, **({"v": v} if with_v else {})}
 
 
 def parts(idxs: list, n: int) -> list:
@@ -112,49 +123,53 @@ def store_pass(policy, ref, ds, idxs: list, args, gen) -> dict:
                 b = load(ds, part, args.device)
                 out_old = policy.policy_inputs(b)
                 q_old = action_quantities(policy, out_old, n_mc=args.n_mc, gen=gen)
-                q_ref = action_quantities(ref, ref.policy_inputs(b), store=q_old)
+                q_ref = action_quantities(ref, ref.policy_inputs(b), store=q_old, with_v=args.v_anchor > 0)
                 per_item = out_old["mask"].sum(-1).split(torch.bincount(b["agent"]["batch"], minlength=len(part)).tolist())
                 n_act = [int(x.sum()) for x in per_item]
                 for j, i in enumerate(part):
                     sl = slice(sum(n_act[:j]), sum(n_act[:j + 1]))
                     out[i] = {k: v[sl].cpu() for k, v in q_old.items()}
                     out[i]["logp_ref"] = q_ref["logp"][sl].cpu()
+                    if "v" in q_ref:
+                        out[i]["v_ref"] = q_ref["v"][sl].cpu()
                     out[i]["adv"] = float(b["weight"][j])
         return out
     return retry_in_parts(run, idxs)[0]
 
 
 def update_step(policy, opt, ds, idxs: list, store: dict, args):
-    """One optimiser step on the rollout scenes `idxs`: -min(r A, clip(r) A) + kl_coef * k3, averaged over the
-    minibatch's valid actions. If the scenes do not fit in GPU memory together they are processed in 2, 4, ... parts
-    with gradient accumulation (per-part sums over the minibatch's action count: the same gradient).
-    Returns (ratios, mean k3, clip fraction, n parts)."""
+    """One optimiser step on the rollout scenes `idxs`: -min(r A, clip(r) A) + kl_coef * k3 (+ v_anchor * velocity
+    anchor), averaged over the minibatch's valid actions. If the scenes do not fit in GPU memory together they are
+    processed in 2, 4, ... parts with gradient accumulation (per-part sums over the minibatch's action count: the same
+    gradient). Returns (ratios, mean k3, clip fraction, n parts, mean velocity anchor)."""
     dev = args.device
     n_ok = sum(int(torch.isfinite(store[i]["logp"]).sum()) for i in idxs)  # the support is fixed: known in advance
 
     def run(chunks):
-        ratios, k3_sum = [], 0.0
+        ratios, k3_sum, va_sum = [], 0.0, 0.0
         for part in chunks:
             b = load(ds, part, dev)
             st = {k: torch.cat([store[i][k] for i in part]).to(dev) for k in store[part[0]] if k != "adv"}
             advs = torch.cat([torch.full((len(store[i]["logp"]),), store[i]["adv"]) for i in part]).to(dev)
-            q = action_quantities(policy, policy.policy_inputs(b), store=st)
+            q = action_quantities(policy, policy.policy_inputs(b), store=st, with_v="v_ref" in st)
             ok = torch.isfinite(st["logp"]) & torch.isfinite(q["logp"])
             ratio = (q["logp"] - st["logp"])[ok].exp()
             A = advs[ok]
             surr = -torch.min(ratio * A, ratio.clamp(1 - args.clip, 1 + args.clip) * A).sum()
             log_rho = (st["logp_ref"] - q["logp"])[ok]
             k3 = (log_rho.exp() - 1 - log_rho).sum()
-            ((surr + args.kl_coef * k3) / max(n_ok, 1)).backward()
+            va = velocity_anchor(q["v"], st["v_ref"])[ok].sum() if "v_ref" in st else torch.zeros((), device=dev)
+            ((surr + args.kl_coef * k3 + args.v_anchor * va) / max(n_ok, 1)).backward()
             ratios.append(ratio.detach())
             k3_sum += float(k3.detach())
-        return torch.cat(ratios), k3_sum
+            va_sum += float(va.detach())
+        return torch.cat(ratios), k3_sum, va_sum
 
     opt.zero_grad(set_to_none=True)
-    (r, k3_sum), n = retry_in_parts(run, idxs, on_retry=lambda: opt.zero_grad(set_to_none=True))
+    (r, k3_sum, va_sum), n = retry_in_parts(run, idxs, on_retry=lambda: opt.zero_grad(set_to_none=True))
     torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
     opt.step()
-    return r, k3_sum / max(n_ok, 1), float(((r - 1).abs() > args.clip).float().mean()), n
+    return r, k3_sum / max(n_ok, 1), float(((r - 1).abs() > args.clip).float().mean()), n, va_sum / max(n_ok, 1)
 
 
 def main():
@@ -175,6 +190,8 @@ def main():
                     help="positive: max(A, 0) (only better-than-average rollouts are reinforced); shuffled: control "
                          "without reward signal (advantages permuted across the iteration's rollouts, same statistics); "
                          "zero: no update at all (the gradient is zero at the reference)")
+    ap.add_argument("--v-anchor", type=float, default=0.0,
+                    help="flow only: weight of the velocity-field anchor ||v_theta - v_BC||^2 at the stored draws")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt-every", type=int, default=10)
     ap.add_argument("--run-dir", type=Path, default=None)
@@ -189,6 +206,8 @@ def main():
     cpu_gen = torch.Generator().manual_seed(args.seed)
 
     policy = load_model(args.init, device=dev)
+    if args.v_anchor > 0 and policy.cfg.head != "flow":
+        raise SystemExit("--v-anchor applies to the flow head only")
     ref = load_model(args.init, device=dev).eval()
     for p in ref.parameters():
         p.requires_grad_(False)
@@ -208,7 +227,7 @@ def main():
     wr = csv.writer(log)
     if start == 0:
         wr.writerow(["iter", "train_realism_k", "adv_std_raw", "ratio_mean", "ratio_std", "clip_frac", "k3", "kl_coef",
-                     "frac_outside_support", "n_actions", "seconds", "split_steps"])
+                     "frac_outside_support", "n_actions", "seconds", "split_steps", "v_anchor"])
     for it in range(start, args.iters):
         t0 = time.time()
         scenes = sorted(random.Random(1_000_000 + 1000 * args.seed + it).sample(pool, args.scenes))
@@ -235,14 +254,15 @@ def main():
         n_actions = sum(len(v["logp"]) for v in store.values())
         out_frac = float(np.mean([float((~torch.isfinite(v["logp"])).float().mean()) for v in store.values()]))
 
-        stats = {"ratio": [], "clip": [], "k3": [], "parts": []}
+        stats = {"ratio": [], "clip": [], "k3": [], "parts": [], "va": []}
         for _ in range(args.epochs):
             for idxs in batches(len(ds), args.minibatch, cpu_gen):
-                ratio, k3, clip_frac, n_parts = update_step(policy, opt, ds, idxs, store, args)
+                ratio, k3, clip_frac, n_parts, va = update_step(policy, opt, ds, idxs, store, args)
                 stats["ratio"].append(ratio)
                 stats["clip"].append(clip_frac)
                 stats["k3"].append(k3)
                 stats["parts"].append(n_parts)
+                stats["va"].append(va)
         # adaptive anchor (Ziegler et al.): move the coefficient toward the common KL target
         k3_now = float(np.mean(stats["k3"][-max(1, len(stats["k3"]) // args.epochs):]))
         args.kl_coef *= 1 + float(np.clip(k3_now / args.kl_target - 1, -0.2, 0.2)) / args.kl_horizon
@@ -250,7 +270,8 @@ def main():
         m_all = float(np.mean([rewards[s]["m_all"] for s in scenes]))
         wr.writerow([it + 1, f"{m_all:.5f}", f"{adv_std:.5f}", f"{ratios.mean():.4f}", f"{ratios.std():.4f}",
                      f"{float(np.mean(stats['clip'])):.4f}", f"{k3_now:.5f}", f"{args.kl_coef:.4f}",
-                     f"{out_frac:.4f}", n_actions, f"{time.time() - t0:.1f}", sum(n > 1 for n in stats["parts"])])
+                     f"{out_frac:.4f}", n_actions, f"{time.time() - t0:.1f}", sum(n > 1 for n in stats["parts"]),
+                     f"{float(np.mean(stats['va'][-max(1, len(stats['va']) // args.epochs):])):.5f}"])
         log.flush()
         if (it + 1) % args.ckpt_every == 0 or it + 1 == args.iters:
             save(last, policy, opt, {"iter": it + 1, "kl_coef": args.kl_coef})
