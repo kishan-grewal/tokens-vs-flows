@@ -66,6 +66,14 @@ def test_velocity_anchor_holds_the_field_near_t0_where_the_eps_loss_does_not():
     assert g_eps.norm() < 1e-4 * g_anchor.norm()  # t^2 weighting: the likelihood barely sees the field near t = 0
 
 
+def test_x1_form_anchor_weights_draws_by_one_minus_t_squared():
+    v, v_ref = torch.randn(4, 3, 15), torch.randn(4, 3, 15)
+    t = torch.tensor([0.0, 0.5, 1.0]).expand(4, 3)
+    d = (v - v_ref).pow(2).sum(-1)
+    assert torch.allclose(velocity_anchor(v, v_ref, t), (d * torch.tensor([1.0, 0.25, 0.0])).mean(-1))
+    assert torch.allclose(velocity_anchor(v, v_ref, torch.zeros(4, 3)), velocity_anchor(v, v_ref))  # = uniform at t = 0
+
+
 def test_retry_in_parts_frees_the_failed_attempt_before_retrying():
     attempts = []
 

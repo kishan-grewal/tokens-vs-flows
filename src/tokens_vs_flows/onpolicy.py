@@ -14,7 +14,9 @@ Each iteration, from the current policy (the "old" policy of the iteration):
      with dropout off; kl_coef adapts to a common target (Ziegler-style, both arms).
      Optional for flow (--v-anchor w > 0): + w * ||v_theta - v_BC||^2 at the stored draws (summed over dims, mean
      over draws), an anchor on the velocity field itself. Unlike the eps-form likelihood, which weights each draw by
-     t^2, it is not down-weighted near t = 0, where sampling starts.
+     t^2, it is not down-weighted near t = 0, where sampling starts. With --v-anchor-form x1 it anchors the predicted
+     clean sample x1_hat = x_t + (1 - t) v instead, i.e. weights each draw by (1 - t)^2: it holds the field where the
+     eps-form likelihood is blind and leaves it free where the likelihood (and so the ratio) acts.
 Usage: python -m tokens_vs_flows.onpolicy --init runs/bc_flow_s0 --iters 100 [--scenes 32 --k 4 --epochs 4 ...]
 Writes <run>/ckpt/final.pt, <run>/iters.csv (per-iteration statistics) and <run>/config.json.
 """
@@ -58,9 +60,11 @@ def flow_draw_losses(head, h, x1, t, eps, return_v: bool = False):
         return (loss, v) if return_v else loss
 
 
-def velocity_anchor(v, v_ref):
-    """Per-action anchor [N] on the velocity field: ||v - v_ref||^2 summed over dims, mean over the draws."""
-    return (v - v_ref).pow(2).sum(-1).mean(-1)
+def velocity_anchor(v, v_ref, t=None):
+    """Per-action anchor [N] on the velocity field: ||v - v_ref||^2 summed over dims, mean over the draws; with the
+    draw times t [N, n_mc], each draw is weighted by (1 - t)^2 (= ||x1_hat - x1_hat_ref||^2, the x1-prediction form)."""
+    d = (v - v_ref).pow(2).sum(-1)
+    return (d if t is None else d * (1 - t).pow(2)).mean(-1)
 
 
 def batches(n_items: int, size: int, gen: torch.Generator):
@@ -158,7 +162,8 @@ def update_step(policy, opt, ds, idxs: list, store: dict, args):
             surr = -torch.min(ratio * A, ratio.clamp(1 - args.clip, 1 + args.clip) * A).sum()
             log_rho = (st["logp_ref"] - q["logp"])[ok]
             k3 = (log_rho.exp() - 1 - log_rho).sum()
-            va = velocity_anchor(q["v"], st["v_ref"])[ok].sum() if "v_ref" in st else torch.zeros((), device=dev)
+            va = (velocity_anchor(q["v"], st["v_ref"], q["t"] if args.v_anchor_form == "x1" else None)[ok].sum()
+                  if "v_ref" in st else torch.zeros((), device=dev))
             ((surr + args.kl_coef * k3 + args.v_anchor * va) / max(n_ok, 1)).backward()
             ratios.append(ratio.detach())
             k3_sum += float(k3.detach())
@@ -192,6 +197,9 @@ def main():
                          "zero: no update at all (the gradient is zero at the reference)")
     ap.add_argument("--v-anchor", type=float, default=0.0,
                     help="flow only: weight of the velocity-field anchor ||v_theta - v_BC||^2 at the stored draws")
+    ap.add_argument("--v-anchor-form", default="velocity", choices=["velocity", "x1"],
+                    help="velocity: every draw weighted equally; x1: weighted by (1 - t)^2 (anchors the predicted "
+                         "clean sample, i.e. the field near the noise end that the eps-form likelihood ignores)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt-every", type=int, default=10)
     ap.add_argument("--run-dir", type=Path, default=None)
