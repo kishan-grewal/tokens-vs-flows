@@ -383,6 +383,70 @@ def stopping(runs: Dict[str, Tuple[List[Path], str]], out: Path, title: str = ""
     plt.close(fig)
 
 
+def standstill(runs: Dict[str, Tuple[List[Path], str]], out: Path, title: str = "") -> None:
+    """Agents that wait in the log, and agents that brake to a stop (runs/<id>/standstill.json from
+    eval/standstill.py), seed mean; runs styled as in event_timing.
+    Left: of the agents below 0.5 m/s for the log's whole 8 s, the share of rollouts moving (>= 0.5 m/s) at each step;
+    the dotted line marks 1.1 s, after which the policy's 11-frame history holds only its own simulated states.
+    Right: the share of rollouts that keep those agents still for all 8 s (solid), and of the agents moving at the
+    start that the log brings to a stop, the share of rollouts that end stopped (light)."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4), gridspec_kw={"width_ratios": [1.3, 1]})
+    dashes = iter([(0, (5, 3)), (0, (1, 2)), (0, (6, 2, 1, 2))])
+    ax = axes[0]
+    _style(ax)
+    ax.xaxis.grid(True, color=GRID, lw=0.8)
+    bars, placed = [], []
+    for name, (dirs, kind) in runs.items():
+        ds = [json.loads((Path(r) / "standstill.json").read_text()) for r in dirs]
+        if kind in ARM_COLORS:
+            c, ls = ARM_COLORS[kind], "-"
+        elif kind.split("_")[0] in ARM_COLORS:
+            c, ls = ARM_COLORS[kind.split("_")[0]], (0, (5, 2))
+        else:
+            c, ls = "#8d8c88", next(dashes)
+        t = np.array(ds[0]["waiting"]["t_seconds"])
+        y = np.mean([d["waiting"]["moving_by_t"] for d in ds], 0)
+        ax.plot(t, y, color=c, ls=ls, lw=2.0 if kind != "ref" else 1.5, label=name)
+        if all(abs(y[-1] - q) > 0.03 for q in placed):  # skip a label that would overprint another
+            ax.annotate(f"{y[-1]:.2f}", (t[-1], y[-1]), xytext=(4, 0), textcoords="offset points", va="center",
+                        fontsize=7.5, color=INK)
+            placed.append(y[-1])
+        bars.append((name, c, [d["waiting"]["held_share"] for d in ds], [d["braking"]["end_stopped_share"] for d in ds]))
+    ax.axvline(1.1, color=MUTED, lw=1, ls=":")
+    ax.annotate("history now all simulated", (1.1, 1.0), xytext=(4, -2), textcoords="offset points", va="top",
+                fontsize=7.5, color=MUTED)
+    ax.set_xlim(0, 8.6)
+    ax.set_ylim(0, 1.04)
+    ax.set_xlabel("time since the end of the logged history (s)", fontsize=8, color=MUTED)
+    ax.set_ylabel("share of rollouts moving (>= 0.5 m/s)", fontsize=8, color=MUTED)
+    n_wait = json.loads((Path(next(iter(runs.values()))[0][0]) / "standstill.json").read_text())["waiting"]["n_agents"]
+    ax.set_title(f"agents that wait for all 8 s in the log ({n_wait})", fontsize=9.5, color=INK)
+    ax.legend(fontsize=8, frameon=False, loc="center right")
+    ax = axes[1]
+    _style(ax)
+    ax.yaxis.grid(False)
+    ax.xaxis.grid(True, color=GRID, lw=0.8)
+    for i, (name, c, held, braked) in enumerate(bars):
+        for j, (vals, alpha, lab) in enumerate([(held, 1.0, "waiting agents kept still for 8 s"),
+                                                 (braked, 0.45, "moving agents brought to a stop")]):
+            y = i + (j - 0.5) * 0.36
+            ax.barh(y, np.mean(vals), height=0.34, color=c, alpha=alpha, edgecolor="white", linewidth=1.5,
+                    label=lab if i == 0 else None)
+            if len(vals) > 1:
+                ax.scatter(vals, np.full(len(vals), y), s=10, color=INK, zorder=3)
+            ax.text(np.max(vals) + 0.01, y, f"{np.mean(vals):.2f}", va="center", fontsize=7.5, color=INK)
+    ax.set_yticks(range(len(bars)), [b[0] for b in bars], fontsize=8.5, color=INK)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1.12)
+    ax.set_xlabel("share of rollouts", fontsize=8, color=MUTED)
+    ax.set_title("kept still (solid) and brought to a stop (light)", fontsize=9.5, color=INK)
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None:
     """Metrics against fine-tuning round for each head; round 0 is the behaviour-cloned start.
 
@@ -653,6 +717,15 @@ def main():
                      title=f"Sampling knobs trade diversity for realism (seed {s}, val_frozen; ringed = configured point;"
                            " token: top-k, flow: initial-noise scale)")
     field_gaps(seeds["token"], seeds["flow"], figs / "field_gaps_token_vs_flow.png")
+    noise_seeds = [runs / f"bc_flow_noise_s{k}" for k in (0, 1, 2) if (runs / f"bc_flow_noise_s{k}").exists()]
+    still = {"log replay": ([runs / "eval_log_replay"], "ref"), "token replay": ([runs / "eval_token_replay"], "ref"),
+             "token head": (seeds["token"], "token"), "flow head": (seeds["flow"], "flow"),
+             "flow head + history noise": (noise_seeds, "flow_noise")}
+    still = {k: v for k, v in still.items() if v[0] and all((r / "standstill.json").exists() for r in v[0])}
+    if len(still) == 5:
+        standstill(still, figs / "standstill.png",
+                   title="Waiting and braking (val_frozen, 32 rollouts per scenario; heads: mean over "
+                         f"{min(len(v[0]) for k, v in still.items() if v[1] != 'ref')} seed(s))")
     frozen = runs / f"fpo_clip0.01_flow_noise_s{s}"
     if (frozen / "per_scenario.csv").exists():
         field_gaps([runs / f"bc_flow_noise_s{s}"], [frozen], figs / f"field_gaps_freezing_s{s}.png",
@@ -701,7 +774,7 @@ def main():
                       title=f"FPO bends the flow head's sampling paths, with or without reward;\nthe velocity anchor "
                             f"keeps them as straight as behaviour cloning's (seed {s})")
     print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png", figs / "field_gaps_token_vs_flow.png",
-          figs / f"field_gaps_freezing_s{s}.png",
+          figs / f"field_gaps_freezing_s{s}.png", figs / "standstill.png",
           figs / f"rl_behaviour_s{s}.png", figs / f"flow_straightness_s{s}.png", figs / f"anchor_study_s{s}.png")
 
 
