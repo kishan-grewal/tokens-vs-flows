@@ -355,6 +355,56 @@ def rl_rounds(chains: Dict[str, List[Path]], out: Path, title: str = "") -> None
     plt.close(fig)
 
 
+def _ramp(hex_color: str, n: int) -> List[str]:
+    """n steps of one hue from light to full (blended with white), for an ordered knob such as the clip range."""
+    rgb = np.array([int(hex_color[i:i + 2], 16) for i in (1, 3, 5)], dtype=float)
+    return ["#" + "".join(f"{int(round(v)):02x}" for v in rgb + (255 - rgb) * m)
+            for m in (np.linspace(0.6, 0.0, n) if n > 1 else [0.0])]
+
+
+def rl_curves(rows: Dict[str, Tuple[str, List[Tuple[str, Path]]]], out: Path,
+              emphasis: Optional[Dict[str, str]] = None, smooth: int = 5, title: str = "") -> None:
+    """On-policy fine-tuning diagnostics against iteration (runs/<id>/iters.csv), one row per arm.
+
+    rows: {"token head, PPO": ("token", [(label, run dir), ...]), ...} with the runs in knob order (lighter to darker
+    in the arm's hue); a label containing "non-negative" or "shuffled" is dashed; emphasis: the label drawn thick in
+    each row. Columns: realism of the training rollouts (rolling mean over `smooth` iterations; the scenes change
+    every iteration but are the same for every run of a seed), the anchor's KL estimate to the BC model (log scale)
+    and the fraction of clipped ratios. The legend gives each run's val_frozen realism change vs its BC start.
+    """
+    fig, axes = plt.subplots(len(rows), 3, figsize=(14, 3.7 * len(rows)), squeeze=False)
+    for i, (ax_row, (row_title, (arm, entries))) in enumerate(zip(axes, rows.items())):
+        solid = [lab for lab, _ in entries if not any(w in lab for w in ("non-negative", "shuffled"))]
+        colors = dict(zip(solid, _ramp(ARM_COLORS.get(arm, MUTED), len(solid))))
+        for lab, run in entries:
+            it = np.genfromtxt(Path(run) / "iters.csv", delimiter=",", names=True)
+            init = Path(run).resolve().parents[1] / json.loads((Path(run) / "config.json").read_text())["init"]
+            delta = load_detail(run)["realism"] - load_detail(init)["realism"]
+            style = dict(color=colors.get(lab, ARM_COLORS.get(arm, MUTED)), ls="-" if lab in colors else (0, (4, 2)),
+                         lw=2.6 if (emphasis or {}).get(row_title) == lab else 1.4)
+            x = it["iter"]
+            ax_row[0].plot(x[smooth - 1:], np.convolve(it["train_realism_k"], np.ones(smooth) / smooth, "valid"),
+                           label=f"{lab}  (val {delta:+.4f})", **style)
+            ax_row[1].plot(x, it["k3"], **style)
+            ax_row[2].plot(x, it["clip_frac"], **style)
+        for j, ax in enumerate(ax_row):
+            _style(ax)
+            if i == 0:
+                ax.set_title([f"realism of the training rollouts ({smooth}-iteration mean)",
+                              "KL estimate to the BC model (k3, log scale)", "fraction of clipped ratios"][j],
+                             fontsize=9.5, color=INK)
+            if i == len(rows) - 1:
+                ax.set_xlabel("iteration", fontsize=8, color=MUTED)
+        ax_row[1].set_yscale("log")
+        ax_row[0].set_ylabel(row_title, fontsize=9, color=INK)
+        ax_row[0].legend(fontsize=7.5, frameon=False, loc="lower left")
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def main():
     """Rebuild the summary figures from the scored runs in runs/ (only runs that exist are used).
     Usage: python -m tokens_vs_flows.figures [--sweep-seed 0]"""
