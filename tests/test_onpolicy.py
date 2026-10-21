@@ -1,8 +1,11 @@
 """Unit tests for the on-policy likelihood pieces: the token log-ratio support and the FPO per-draw losses (CPU)."""
+import weakref
+
+import pytest
 import torch
 
 from tokens_vs_flows.heads import FlowHead
-from tokens_vs_flows.onpolicy import flow_draw_losses, token_logp
+from tokens_vs_flows.onpolicy import flow_draw_losses, retry_in_parts, token_logp
 
 
 def test_token_logp_is_the_softmax_over_the_support():
@@ -45,3 +48,29 @@ def test_fpo_ratio_rises_when_the_policy_moves_toward_the_action():
     opt.step()
     ratio = (-flow_draw_losses(head, h, x1, t, eps).mean(-1) - logp_old).exp()
     assert (ratio > 1).all()
+
+
+def test_retry_in_parts_frees_the_failed_attempt_before_retrying():
+    attempts = []
+
+    def fn(chunks):
+        activations = torch.zeros(1000)  # stands for the attempt's activations and graph
+        attempts.append(weakref.ref(activations))
+        if len(chunks) == 1:
+            raise torch.cuda.OutOfMemoryError("forced")
+        assert attempts[0]() is None  # released before the smaller attempt started
+        return [len(c) for c in chunks]
+
+    assert retry_in_parts(fn, list(range(4))) == ([2, 2], 2)
+
+
+def test_retry_in_parts_gives_up_at_one_scene_per_part():
+    calls = []
+
+    def fn(chunks):
+        calls.append(len(chunks))
+        raise torch.cuda.OutOfMemoryError("forced")
+
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        retry_in_parts(fn, list(range(4)))
+    assert calls == [1, 2, 4]
