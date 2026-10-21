@@ -17,6 +17,7 @@ Writes <run>/ckpt/final.pt, <run>/iters.csv (per-iteration statistics) and <run>
 """
 import argparse
 import csv
+import gc
 import json
 import math
 import os
@@ -84,32 +85,43 @@ def load(ds, idxs: list, dev):
     return next(iter(DataLoader(ds, batch_size=len(idxs), sampler=idxs))).to(dev)
 
 
-def store_pass(policy, ref, ds, idxs: list, args, gen) -> dict:
-    """Old-policy and reference quantities for the rollout scenes `idxs`, per scene. Scenes that do not fit in GPU
-    memory together are processed in 2, 4, ... parts (as in train.train_step)."""
+def retry_in_parts(fn, idxs: list, on_retry=None):
+    """fn(parts(idxs, n)) for n = 1, 2, 4, ...: scenes that do not fit in GPU memory together are processed in parts
+    (as in train.train_step). The retry runs after the exception handler has exited, so the failed attempt's frame,
+    with its activations and graph, is freed before the smaller attempt starts. Returns (fn's result, n)."""
     n = 1
     while True:
         try:
-            out = {}
-            with torch.no_grad():
-                for part in parts(idxs, n):
-                    b = load(ds, part, args.device)
-                    out_old = policy.policy_inputs(b)
-                    q_old = action_quantities(policy, out_old, n_mc=args.n_mc, gen=gen)
-                    q_ref = action_quantities(ref, ref.policy_inputs(b), store=q_old)
-                    per_item = out_old["mask"].sum(-1).split(torch.bincount(b["agent"]["batch"], minlength=len(part)).tolist())
-                    n_act = [int(x.sum()) for x in per_item]
-                    for j, i in enumerate(part):
-                        sl = slice(sum(n_act[:j]), sum(n_act[:j + 1]))
-                        out[i] = {k: v[sl].cpu() for k, v in q_old.items()}
-                        out[i]["logp_ref"] = q_ref["logp"][sl].cpu()
-                        out[i]["adv"] = float(b["weight"][j])
-            return out
+            return fn(parts(idxs, n)), n
         except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            n *= 2
-            if n > len(idxs):
+            if 2 * n > len(idxs):
                 raise
+        if on_retry is not None:
+            on_retry()
+        gc.collect()
+        torch.cuda.empty_cache()
+        n *= 2
+
+
+def store_pass(policy, ref, ds, idxs: list, args, gen) -> dict:
+    """Old-policy and reference quantities for the rollout scenes `idxs`, per scene."""
+    def run(chunks):
+        out = {}
+        with torch.no_grad():
+            for part in chunks:
+                b = load(ds, part, args.device)
+                out_old = policy.policy_inputs(b)
+                q_old = action_quantities(policy, out_old, n_mc=args.n_mc, gen=gen)
+                q_ref = action_quantities(ref, ref.policy_inputs(b), store=q_old)
+                per_item = out_old["mask"].sum(-1).split(torch.bincount(b["agent"]["batch"], minlength=len(part)).tolist())
+                n_act = [int(x.sum()) for x in per_item]
+                for j, i in enumerate(part):
+                    sl = slice(sum(n_act[:j]), sum(n_act[:j + 1]))
+                    out[i] = {k: v[sl].cpu() for k, v in q_old.items()}
+                    out[i]["logp_ref"] = q_ref["logp"][sl].cpu()
+                    out[i]["adv"] = float(b["weight"][j])
+        return out
+    return retry_in_parts(run, idxs)[0]
 
 
 def update_step(policy, opt, ds, idxs: list, store: dict, args):
@@ -119,35 +131,30 @@ def update_step(policy, opt, ds, idxs: list, store: dict, args):
     Returns (ratios, mean k3, clip fraction, n parts)."""
     dev = args.device
     n_ok = sum(int(torch.isfinite(store[i]["logp"]).sum()) for i in idxs)  # the support is fixed: known in advance
-    n = 1
-    while True:
-        try:
-            opt.zero_grad(set_to_none=True)
-            ratios, k3_sum = [], 0.0
-            for part in parts(idxs, n):
-                b = load(ds, part, dev)
-                st = {k: torch.cat([store[i][k] for i in part]).to(dev) for k in store[part[0]] if k != "adv"}
-                advs = torch.cat([torch.full((len(store[i]["logp"]),), store[i]["adv"]) for i in part]).to(dev)
-                q = action_quantities(policy, policy.policy_inputs(b), store=st)
-                ok = torch.isfinite(st["logp"]) & torch.isfinite(q["logp"])
-                ratio = (q["logp"] - st["logp"])[ok].exp()
-                A = advs[ok]
-                surr = -torch.min(ratio * A, ratio.clamp(1 - args.clip, 1 + args.clip) * A).sum()
-                log_rho = (st["logp_ref"] - q["logp"])[ok]
-                k3 = (log_rho.exp() - 1 - log_rho).sum()
-                ((surr + args.kl_coef * k3) / max(n_ok, 1)).backward()
-                ratios.append(ratio.detach())
-                k3_sum += float(k3.detach())
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
-            opt.step()
-            r = torch.cat(ratios)
-            return r, k3_sum / max(n_ok, 1), float(((r - 1).abs() > args.clip).float().mean()), n
-        except torch.cuda.OutOfMemoryError:
-            opt.zero_grad(set_to_none=True)
-            torch.cuda.empty_cache()
-            n *= 2
-            if n > len(idxs):
-                raise
+
+    def run(chunks):
+        ratios, k3_sum = [], 0.0
+        for part in chunks:
+            b = load(ds, part, dev)
+            st = {k: torch.cat([store[i][k] for i in part]).to(dev) for k in store[part[0]] if k != "adv"}
+            advs = torch.cat([torch.full((len(store[i]["logp"]),), store[i]["adv"]) for i in part]).to(dev)
+            q = action_quantities(policy, policy.policy_inputs(b), store=st)
+            ok = torch.isfinite(st["logp"]) & torch.isfinite(q["logp"])
+            ratio = (q["logp"] - st["logp"])[ok].exp()
+            A = advs[ok]
+            surr = -torch.min(ratio * A, ratio.clamp(1 - args.clip, 1 + args.clip) * A).sum()
+            log_rho = (st["logp_ref"] - q["logp"])[ok]
+            k3 = (log_rho.exp() - 1 - log_rho).sum()
+            ((surr + args.kl_coef * k3) / max(n_ok, 1)).backward()
+            ratios.append(ratio.detach())
+            k3_sum += float(k3.detach())
+        return torch.cat(ratios), k3_sum
+
+    opt.zero_grad(set_to_none=True)
+    (r, k3_sum), n = retry_in_parts(run, idxs, on_retry=lambda: opt.zero_grad(set_to_none=True))
+    torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+    opt.step()
+    return r, k3_sum / max(n_ok, 1), float(((r - 1).abs() > args.clip).float().mean()), n
 
 
 def main():
