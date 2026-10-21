@@ -494,6 +494,80 @@ def flow_straightness(rows: List[Tuple[str, Path, str]], out: Path, title: str =
     plt.close(fig)
 
 
+def anchor_study(columns: List[Tuple[str, Optional[Path], List[Path], Optional[Path]]], base: Path, out: Path,
+                 refs: Optional[Dict[str, Tuple[Path, Path]]] = None, log: Optional[Path] = None,
+                 title: str = "") -> None:
+    """Flow fine-tuning with and without anchors, one column per method: realism change vs the behaviour-cloning start
+    (paired mean over scenarios, bootstrap 95% CI), false stops (runs/<id>/stopping.json), jerky frames inside actions
+    (runs/<id>/jitter.json) and flow straightness (runs/<id>/flow_straightness.json).
+
+    columns: [(label, 30-iteration run or None, [100-iteration runs], shuffled-advantage control at 100 iterations or
+    None)]; open circle = 30 iterations, filled = 100, cross = the control. Dotted lines: the start's level; log: the
+    log replay run, whose jerkiness is drawn dashed grey; refs: {label: (fine-tuned run, its start)} drawn as dashed
+    lines in the realism panel.
+    """
+    b = per_scenario([base])["metametric"]
+    rng = np.random.default_rng(0)
+
+    def delta(run):
+        d = per_scenario([run])["metametric"] - b
+        boot = [d[rng.integers(0, len(d), len(d))].mean() for _ in range(2000)]
+        return d.mean(), np.percentile(boot, 2.5), np.percentile(boot, 97.5)
+
+    load = lambda run, f: json.loads((Path(run) / f).read_text())
+    panels = [("realism change vs behaviour cloning ↑", None),
+              ("false stops ↓", lambda r: load(r, "stopping.json")["false_stop"]),
+              ("jerky frames inside actions\n(acceleration > 4 m/s²)", lambda r: load(r, "jitter.json")["sim_inside"]["share_above_4"]),
+              ("flow straightness ↓ (0 = straight)", lambda r: load(r, "flow_straightness.json")["straightness"])]
+    c, x = ARM_COLORS["flow"], np.arange(len(columns))
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 4.2))
+    for ax, (name, get) in zip(axes, panels):
+        _style(ax)
+        for i, (label, r30, r100, ctrl) in enumerate(columns):
+            for run, kind in [(r30, "30")] + [(r, "100") for r in r100] + [(ctrl, "ctrl")]:
+                if run is None or not (Path(run) / "metrics.json").exists():
+                    continue
+                dx = {"30": -0.15, "100": 0.0, "ctrl": 0.15}[kind]
+                if get is None:
+                    v, lo, hi = delta(run)
+                    ax.plot([i + dx, i + dx], [lo, hi], color=MUTED if kind == "ctrl" else c, lw=1.2, zorder=2)
+                else:
+                    try:
+                        v = get(run)
+                    except FileNotFoundError:
+                        continue
+                style = {"30": dict(marker="o", facecolors="white", edgecolors=c, s=46, linewidths=1.6),
+                         "100": dict(marker="o", color=c, edgecolors="white", s=54, linewidths=1.0),
+                         "ctrl": dict(marker="X", color=MUTED, edgecolors="white", s=60, linewidths=0.8)}[kind]
+                ax.scatter(i + dx, v, zorder=3, **style)
+        if get is None:
+            ax.axhline(0, color=MUTED, lw=1, ls=(0, (1, 2)))
+            for lab, (run, start) in (refs or {}).items():
+                d = (per_scenario([run])["metametric"] - per_scenario([start])["metametric"]).mean()
+                ax.axhline(d, color=ARM_COLORS["token"], lw=1.2, ls=(0, (4, 3)), label=f"{lab} ({d:+.4f})")
+        else:
+            ax.axhline(get(base), color=MUTED, lw=1, ls=(0, (1, 2)))
+            if "jerky" in name and log is not None:
+                ax.axhline(get(log), color="#8d8c88", lw=1.2, ls=(0, (4, 3)), label="the log")
+        ax.set_xticks(x, [col[0] for col in columns], fontsize=7.5, rotation=30, ha="right")
+        ax.set_title(name, fontsize=9, color=INK)
+    axes[0].scatter([], [], marker="o", facecolors="white", edgecolors=c, s=46, linewidths=1.6, label="30 iterations")
+    axes[0].scatter([], [], marker="o", color=c, s=54, label="100 iterations")
+    axes[0].scatter([], [], marker="X", color=MUTED, s=60, label="100 iterations, shuffled-advantage control (no reward)")
+    axes[0].plot([], [], color=MUTED, lw=1, ls=(0, (1, 2)), label="behaviour-cloning start")
+    handles, labels = [], []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        handles += [hh for hh, ll in zip(h, l) if ll not in labels]
+        labels += [ll for ll in l if ll not in labels]
+    fig.legend(handles, labels, loc="lower center", ncol=len(labels), fontsize=8, frameon=False)
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def _ramp(hex_color: str, n: int) -> List[str]:
     """n steps of one hue from light to full (blended with white), for an ordered knob such as the clip range."""
     rgb = np.array([int(hex_color[i:i + 2], 16) for i in (1, 3, 5)], dtype=float)
@@ -600,12 +674,25 @@ def main():
             ("FPO + velocity anchor, " + ("100" if (anchored / "flow_straightness.json").exists() else "30")
              + " iterations", anchored if (anchored / "flow_straightness.json").exists()
              else runs / f"fpo_vanchor10_flow_noise_s{s}", "fix")]
+    noise = lambda name: runs / f"{name}_flow_noise_s{s}"
+    anchor_study([("no anchor", noise("fpo_clip0.01"), [noise("fpo"), noise("fpo_rerun")], noise("fpo_shuffled")),
+                  ("uniform anchor, w = 0.01", noise("fpo_vanchor0.01"), [noise("fpo_anchor0.01")],
+                   noise("fpo_anchor0.01_shuffled")),
+                  ("uniform, w = 0.1", noise("fpo_vanchor0.1"), [], None),
+                  ("uniform, w = 1", noise("fpo_vanchor1"), [], None),
+                  ("uniform, w = 10", noise("fpo_vanchor10"), [noise("fpo_anchored")], noise("fpo_anchored_shuffled")),
+                  ("clean-sample anchor, w = 10", noise("fpo_x1anchor10"), [noise("fpo_anchorx1")],
+                   noise("fpo_anchorx1_shuffled"))],
+                 runs / f"bc_flow_noise_s{s}", figs / f"anchor_study_s{s}.png",
+                 refs={"PPO on the token head, 100 it.": (runs / f"ppo_token_s{s}", runs / f"bc_token_s{s}")},
+                 log=runs / "eval_log_replay",
+                 title=f"Anchoring FPO on the flow head (history noise, seed {s}): realism and behaviour by anchor")
     flow_straightness([r for r in rows if (r[1] / "flow_straightness.json").exists()],
                       figs / f"flow_straightness_s{s}.png",
                       title=f"FPO bends the flow head's sampling paths, with or without reward;\nthe velocity anchor "
                             f"keeps them as straight as behaviour cloning's (seed {s})")
     print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png", figs / "field_gaps_token_vs_flow.png",
-          figs / f"rl_behaviour_s{s}.png", figs / f"flow_straightness_s{s}.png")
+          figs / f"rl_behaviour_s{s}.png", figs / f"flow_straightness_s{s}.png", figs / f"anchor_study_s{s}.png")
 
 
 if __name__ == "__main__":
