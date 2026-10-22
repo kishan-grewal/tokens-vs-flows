@@ -724,8 +724,8 @@ def main():
     still = {k: v for k, v in still.items() if v[0] and all((r / "standstill.json").exists() for r in v[0])}
     if len(still) == 5:
         standstill(still, figs / "standstill.png",
-                   title="Waiting and braking (val_frozen, 32 rollouts per scenario; heads: mean over "
-                         f"{min(len(v[0]) for k, v in still.items() if v[1] != 'ref')} seed(s))")
+                   title="Waiting and braking (val_frozen, 32 rollouts per scenario; heads: mean over seeds, "
+                         "dots = single seeds)")
     frozen = runs / f"fpo_clip0.01_flow_noise_s{s}"
     if (frozen / "per_scenario.csv").exists():
         field_gaps([runs / f"bc_flow_noise_s{s}"], [frozen], figs / f"field_gaps_freezing_s{s}.png",
