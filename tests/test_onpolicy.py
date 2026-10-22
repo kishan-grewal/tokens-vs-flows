@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tokens_vs_flows.heads import FlowHead
-from tokens_vs_flows.onpolicy import flow_draw_losses, retry_in_parts, token_logp, velocity_anchor
+from tokens_vs_flows.onpolicy import flow_draw_losses, grad_snr, retry_in_parts, token_logp, velocity_anchor
 
 
 def test_token_logp_is_the_softmax_over_the_support():
@@ -98,3 +98,14 @@ def test_retry_in_parts_gives_up_at_one_scene_per_part():
     with pytest.raises(torch.cuda.OutOfMemoryError):
         retry_in_parts(fn, list(range(4)))
     assert calls == [1, 2, 4]
+
+
+def test_grad_snr_is_high_for_a_shared_direction_and_low_for_noise():
+    torch.manual_seed(0)
+    d = torch.randn(1000)
+    shared = d + 0.1 * torch.randn(8, 1000)
+    noise = torch.randn(8, 1000)
+    assert grad_snr(shared) > 5
+    assert grad_snr(noise) < 0.5
+    # exact on a small case: g = [1, 3] (1-d) -> mean 2, spread sqrt(2) -> sqrt(2)
+    assert abs(grad_snr(torch.tensor([[1.0], [3.0]])) - 2 / 2 ** 0.5) < 1e-6

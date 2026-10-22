@@ -17,6 +17,9 @@ Each iteration, from the current policy (the "old" policy of the iteration):
      t^2, it is not down-weighted near t = 0, where sampling starts. With --v-anchor-form x1 it anchors the predicted
      clean sample x1_hat = x_t + (1 - t) v instead, i.e. weights each draw by (1 - t)^2: it holds the field where the
      eps-form likelihood is blind and leaves it free where the likelihood (and so the ratio) acts.
+Diagnostic (--log-grad-snr): the clipped surrogate's own gradient (no KL or anchor term) is kept for each minibatch
+step, and iters.csv gets grad_snr = ||mean g|| / sqrt(sum_i ||g_i - mean g||^2 / (n - 1)) over the iteration's
+E * B / minibatch steps: how much of the reward-driven update is shared across minibatches rather than noise.
 Usage: python -m tokens_vs_flows.onpolicy --init runs/bc_flow_s0 --iters 100 [--scenes 32 --k 4 --epochs 4 ...]
 Writes <run>/ckpt/final.pt, <run>/iters.csv (per-iteration statistics) and <run>/config.json.
 """
@@ -118,6 +121,13 @@ def retry_in_parts(fn, idxs: list, on_retry=None):
         n *= 2
 
 
+def grad_snr(grads: torch.Tensor) -> float:
+    """||mean g|| / sqrt(sum_i ||g_i - mean g||^2 / (n - 1)) for flattened gradients grads [n, d], n >= 2."""
+    mean = grads.mean(0)
+    spread = ((grads - mean) ** 2).sum() / (len(grads) - 1)
+    return float(mean.norm() / spread.sqrt().clamp_min(1e-30))
+
+
 def store_pass(policy, ref, ds, idxs: list, args, gen) -> dict:
     """Old-policy and reference quantities for the rollout scenes `idxs`, per scene."""
     def run(chunks):
@@ -145,12 +155,16 @@ def update_step(policy, opt, ds, idxs: list, store: dict, args):
     """One optimiser step on the rollout scenes `idxs`: -min(r A, clip(r) A) + kl_coef * k3 (+ v_anchor * velocity
     anchor), averaged over the minibatch's valid actions. If the scenes do not fit in GPU memory together they are
     processed in 2, 4, ... parts with gradient accumulation (per-part sums over the minibatch's action count: the same
-    gradient). Returns (ratios, mean k3, clip fraction, n parts, mean velocity anchor)."""
+    gradient). Returns (ratios, mean k3, clip fraction, n parts, mean velocity anchor, the surrogate's flattened
+    gradient before clipping if args.log_grad_snr else None)."""
     dev = args.device
+    params = [p for p in policy.parameters() if p.requires_grad]
+    g_surr = []
     n_ok = sum(int(torch.isfinite(store[i]["logp"]).sum()) for i in idxs)  # the support is fixed: known in advance
 
     def run(chunks):
         ratios, k3_sum, va_sum = [], 0.0, 0.0
+        g_surr.clear()  # a retry in parts starts over
         for part in chunks:
             b = load(ds, part, dev)
             st = {k: torch.cat([store[i][k] for i in part]).to(dev) for k in store[part[0]] if k != "adv"}
@@ -164,6 +178,10 @@ def update_step(policy, opt, ds, idxs: list, store: dict, args):
             k3 = (log_rho.exp() - 1 - log_rho).sum()
             va = (velocity_anchor(q["v"], st["v_ref"], q["t"] if args.v_anchor_form == "x1" else None)[ok].sum()
                   if "v_ref" in st else torch.zeros((), device=dev))
+            if args.log_grad_snr:
+                gs = torch.autograd.grad(surr / max(n_ok, 1), params, retain_graph=True, allow_unused=True)
+                g_surr.append(torch.cat([(g if g is not None else torch.zeros_like(p)).reshape(-1)
+                                         for g, p in zip(gs, params)]))
             ((surr + args.kl_coef * k3 + args.v_anchor * va) / max(n_ok, 1)).backward()
             ratios.append(ratio.detach())
             k3_sum += float(k3.detach())
@@ -174,7 +192,8 @@ def update_step(policy, opt, ds, idxs: list, store: dict, args):
     (r, k3_sum, va_sum), n = retry_in_parts(run, idxs, on_retry=lambda: opt.zero_grad(set_to_none=True))
     torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
     opt.step()
-    return r, k3_sum / max(n_ok, 1), float(((r - 1).abs() > args.clip).float().mean()), n, va_sum / max(n_ok, 1)
+    return (r, k3_sum / max(n_ok, 1), float(((r - 1).abs() > args.clip).float().mean()), n, va_sum / max(n_ok, 1),
+            torch.stack(g_surr).sum(0) if g_surr else None)
 
 
 def main():
@@ -200,6 +219,8 @@ def main():
     ap.add_argument("--v-anchor-form", default="velocity", choices=["velocity", "x1"],
                     help="velocity: every draw weighted equally; x1: weighted by (1 - t)^2 (anchors the predicted "
                          "clean sample, i.e. the field near the noise end that the eps-form likelihood ignores)")
+    ap.add_argument("--log-grad-snr", action="store_true",
+                    help="log the per-iteration signal-to-noise ratio of the surrogate's gradient across minibatches")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt-every", type=int, default=10)
     ap.add_argument("--run-dir", type=Path, default=None)
@@ -235,7 +256,8 @@ def main():
     wr = csv.writer(log)
     if start == 0:
         wr.writerow(["iter", "train_realism_k", "adv_std_raw", "ratio_mean", "ratio_std", "clip_frac", "k3", "kl_coef",
-                     "frac_outside_support", "n_actions", "seconds", "split_steps", "v_anchor"])
+                     "frac_outside_support", "n_actions", "seconds", "split_steps", "v_anchor"]
+                    + (["grad_snr", "grad_norm"] if args.log_grad_snr else []))
     for it in range(start, args.iters):
         t0 = time.time()
         scenes = sorted(random.Random(1_000_000 + 1000 * args.seed + it).sample(pool, args.scenes))
@@ -262,15 +284,17 @@ def main():
         n_actions = sum(len(v["logp"]) for v in store.values())
         out_frac = float(np.mean([float((~torch.isfinite(v["logp"])).float().mean()) for v in store.values()]))
 
-        stats = {"ratio": [], "clip": [], "k3": [], "parts": [], "va": []}
+        stats = {"ratio": [], "clip": [], "k3": [], "parts": [], "va": [], "g": []}
         for _ in range(args.epochs):
             for idxs in batches(len(ds), args.minibatch, cpu_gen):
-                ratio, k3, clip_frac, n_parts, va = update_step(policy, opt, ds, idxs, store, args)
+                ratio, k3, clip_frac, n_parts, va, g = update_step(policy, opt, ds, idxs, store, args)
                 stats["ratio"].append(ratio)
                 stats["clip"].append(clip_frac)
                 stats["k3"].append(k3)
                 stats["parts"].append(n_parts)
                 stats["va"].append(va)
+                if g is not None:
+                    stats["g"].append(g)
         # adaptive anchor (Ziegler et al.): move the coefficient toward the common KL target
         k3_now = float(np.mean(stats["k3"][-max(1, len(stats["k3"]) // args.epochs):]))
         args.kl_coef *= 1 + float(np.clip(k3_now / args.kl_target - 1, -0.2, 0.2)) / args.kl_horizon
@@ -279,7 +303,9 @@ def main():
         wr.writerow([it + 1, f"{m_all:.5f}", f"{adv_std:.5f}", f"{ratios.mean():.4f}", f"{ratios.std():.4f}",
                      f"{float(np.mean(stats['clip'])):.4f}", f"{k3_now:.5f}", f"{args.kl_coef:.4f}",
                      f"{out_frac:.4f}", n_actions, f"{time.time() - t0:.1f}", sum(n > 1 for n in stats["parts"]),
-                     f"{float(np.mean(stats['va'][-max(1, len(stats['va']) // args.epochs):])):.5f}"])
+                     f"{float(np.mean(stats['va'][-max(1, len(stats['va']) // args.epochs):])):.5f}"]
+                    + ([f"{grad_snr(torch.stack(stats['g'])):.4f}",
+                        f"{float(torch.stack(stats['g']).norm(dim=1).mean()):.4e}"] if stats["g"] else []))
         log.flush()
         if (it + 1) % args.ckpt_every == 0 or it + 1 == args.iters:
             save(last, policy, opt, {"iter": it + 1, "kl_coef": args.kl_coef})
