@@ -73,8 +73,8 @@ def head_comparison(arms: Dict[str, List[Path]], out: Path, refs: Optional[Dict[
         lo, hi = np.nanmin(all_vals), np.nanmax(all_vals)
         pad = 0.25 * (hi - lo) if hi > lo else 0.05 * max(abs(hi), 1e-3)
         ax.set_ylim(lo - pad, hi + pad)
-    n = {a: len(r) for a, r in arms.items()}
-    fig.suptitle(title or f"Token vs flow head on SMART-nano: val_frozen, 32 rollouts, seeds {n} "
+    n = ", ".join(f"{a} {len(r)}" for a, r in arms.items())
+    fig.suptitle(title or f"Token vs flow head on SMART-nano: val_frozen, 32 rollouts, seeds: {n} "
                           "(dot = seed, tick = mean; ↑/↓ = higher/lower is better)", fontsize=10.5, color=INK)
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
