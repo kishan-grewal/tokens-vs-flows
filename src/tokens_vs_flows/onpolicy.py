@@ -221,6 +221,9 @@ def main():
                          "clean sample, i.e. the field near the noise end that the eps-form likelihood ignores)")
     ap.add_argument("--log-grad-snr", action="store_true",
                     help="log the per-iteration signal-to-noise ratio of the surrogate's gradient across minibatches")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="reproducibility check: deterministic kernels where PyTorch has them (warns where it does not) "
+                         "and no TF32; slower")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt-every", type=int, default=10)
     ap.add_argument("--run-dir", type=Path, default=None)
@@ -230,6 +233,11 @@ def main():
     run_dir = Path(args.run_dir or os.environ["RUN_DIR"])
     (run_dir / "ckpt").mkdir(parents=True, exist_ok=True)
     setup_cuda("fp32")
+    if args.deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")  # before the first cuBLAS call
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
     set_seed(args.seed)
     gen = torch.Generator(device=dev).manual_seed(args.seed)
     cpu_gen = torch.Generator().manual_seed(args.seed)
