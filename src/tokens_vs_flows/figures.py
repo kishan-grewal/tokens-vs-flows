@@ -634,6 +634,50 @@ def anchor_study(columns: List[Tuple[str, Optional[Path], List[Path], Optional[P
     plt.close(fig)
 
 
+def rl_seeds(arms: List[Tuple[str, List[Tuple[Path, Path]], List[Tuple[Path, Path]], str]], out: Path,
+             title: str = "") -> None:
+    """Fine-tuning across seeds, one column per method: realism, collision rate and kinematic score of each fine-tuned
+    run minus its own behaviour-cloning start (runs/<id>/metrics.json), and false stops (runs/<id>/stopping.json).
+
+    arms: [(label, [(fine-tuned run, its start) per seed], [(shuffled-advantage control, its start)], arm colour key)];
+    dot = seed, tick = seed mean, cross = control. In the false-stop panel open circles mark the starts.
+    """
+    load = lambda run, f: json.loads((Path(run) / f).read_text())
+    panels = [("realism change vs start ↑", lambda r, s: load(r, "metrics.json")["realism"] - load(s, "metrics.json")["realism"]),
+              ("collision rate change ↓", lambda r, s: load(r, "metrics.json")["collision_rate"] - load(s, "metrics.json")["collision_rate"]),
+              ("kinematic change ↑", lambda r, s: load(r, "metrics.json")["kinematic"] - load(s, "metrics.json")["kinematic"]),
+              ("false stops ↓", lambda r, s: load(r, "stopping.json")["false_stop"])]
+    x = np.arange(len(arms))
+    fig, axes = plt.subplots(1, len(panels), figsize=(3.6 * len(panels), 4.0))
+    for ax, (name, get) in zip(axes, panels):
+        _style(ax)
+        for i, (label, runs, ctrls, key) in enumerate(arms):
+            c = ARM_COLORS.get(key, MUTED)
+            vals = [get(r, s) for r, s in runs]
+            ax.scatter(np.full(len(vals), i - 0.08), vals, color=c, edgecolors="white", s=54, linewidths=1.0, zorder=3)
+            if len(vals) > 1:
+                ax.plot([i - 0.22, i + 0.06], [np.mean(vals)] * 2, color=c, lw=2.2, zorder=2)
+            for r, s in ctrls:
+                ax.scatter(i + 0.16, get(r, s), marker="X", color=MUTED, edgecolors="white", s=60, linewidths=0.8, zorder=3)
+            if "false" in name:
+                ax.scatter(np.full(len(runs), i - 0.08), [load(s, "stopping.json")["false_stop"] for _, s in runs],
+                           marker="o", facecolors="white", edgecolors=c, s=40, linewidths=1.4, zorder=2)
+        if "false" not in name:
+            ax.axhline(0, color=MUTED, lw=1, ls=(0, (1, 2)))
+        ax.set_xticks(x, [a[0] for a in arms], fontsize=8)
+        ax.set_xlim(-0.6, len(arms) - 0.4)
+        ax.set_title(name, fontsize=9, color=INK)
+    axes[0].scatter([], [], color=MUTED, s=54, label="fine-tuned, one dot per seed (bar = mean)")
+    axes[0].scatter([], [], marker="X", color=MUTED, s=60, label="shuffled-advantage control (no reward)")
+    axes[0].scatter([], [], marker="o", facecolors="white", edgecolors=MUTED, s=40, label="behaviour-cloning start")
+    fig.legend(*axes[0].get_legend_handles_labels(), loc="lower center", ncol=3, fontsize=8, frameon=False)
+    fig.suptitle(title, fontsize=10.5, color=INK)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def _ramp(hex_color: str, n: int) -> List[str]:
     """n steps of one hue from light to full (blended with white), for an ordered knob such as the clip range."""
     rgb = np.array([int(hex_color[i:i + 2], 16) for i in (1, 3, 5)], dtype=float)
@@ -748,6 +792,14 @@ def main():
     behaviour = [r for r in behaviour if all((r[1] / f).exists() for f in ("metrics.json", "stopping.json", "jitter.json"))]
     rl_behaviour(behaviour, figs / f"rl_behaviour_s{s}.png",
                  title=f"What reward fine-tuning changed (seed {s}, val_frozen; both FPO runs use identical settings)")
+    scored = lambda r: all((r / f).exists() for f in ("metrics.json", "stopping.json"))
+    pairs = lambda name, start: [(runs / f"{name}_s{k}", runs / f"{start}_s{k}") for k in (0, 1, 2)
+                                 if scored(runs / f"{name}_s{k}") and scored(runs / f"{start}_s{k}")]
+    seed_arms = [("PPO, tokens", pairs("ppo_token", "bc_token"), pairs("ppo_shuffled_token", "bc_token"), "token")]
+    if len(seed_arms[0][1]) > 1:
+        rl_seeds(seed_arms, figs / "ppo_seeds.png",
+                 title="PPO on the token head across seeds (100 iterations, val_frozen; each run vs its own "
+                       "behaviour-cloning seed)")
     anchored = runs / f"fpo_anchored_flow_noise_s{s}"
     rows = [("behaviour cloning", runs / f"bc_flow_noise_s{s}", "bc"),
             ("FPO run 1, 100 iterations", runs / f"fpo_flow_noise_s{s}", "rl"),
