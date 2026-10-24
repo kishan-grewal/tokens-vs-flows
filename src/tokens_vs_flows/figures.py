@@ -838,7 +838,9 @@ def main():
     rl_behaviour(behaviour, figs / f"rl_behaviour_s{s}.png",
                  title=f"What reward fine-tuning changed (seed {s}, val_frozen; both FPO runs use identical settings)")
     scored = lambda r: all((r / f).exists() for f in ("metrics.json", "stopping.json"))
-    pairs = lambda name, start: [(runs / f"{name}_s{k}", runs / f"{start}_s{k}") for k in (0, 1, 2)
+    # a "<run>_batch64" re-score (rollout batch 64, as every other run) replaces a run first scored at batch 32
+    b64 = lambda r: r.with_name(r.name + "_batch64") if scored(r.with_name(r.name + "_batch64")) else r
+    pairs = lambda name, start: [(b64(runs / f"{name}_s{k}"), runs / f"{start}_s{k}") for k in (0, 1, 2)
                                  if scored(runs / f"{name}_s{k}") and scored(runs / f"{start}_s{k}")]
     seed_arms = [("PPO, tokens", pairs("ppo_token", "bc_token"), pairs("ppo_shuffled_token", "bc_token"), "token")]
     if len(seed_arms[0][1]) > 1:
