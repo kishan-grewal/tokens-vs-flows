@@ -728,6 +728,51 @@ def rl_curves(rows: Dict[str, Tuple[str, List[Tuple[str, Path]]]], out: Path,
     plt.close(fig)
 
 
+def val_vs_test(rows: List[Tuple[str, List[Path], List[Path], List[Path], List[Path]]], out: Path,
+                title: str = "") -> None:
+    """Paired realism differences b - a on val_frozen and on the held-out test split, one row per comparison:
+    rows = [(label, a val runs, b val runs, a test runs, b test runs)]. Dot = mean over scenarios (seed-averaged),
+    whisker = 95% bootstrap CI over scenarios, grey band = +-2x seed std on test (inside it = no detectable
+    difference at this seed count). Uses eval/compare.py, so the numbers match its JSON output."""
+    import sys
+    from tokens_vs_flows import ROOT
+    sys.path.insert(0, str(ROOT / "eval"))
+    import compare as cmp
+    cfg = cmp.wosac.load_config()
+    res = []
+    for label, av, bv, at, bt in rows:
+        load = lambda rs: [cmp.load_run(Path(r), cfg) for r in rs]
+        res.append((label, cmp.compare(load(av), load(bv))["metrics"]["realism"],
+                    cmp.compare(load(at), load(bt))["metrics"]["realism"]))
+    fig, ax = plt.subplots(figsize=(9.5, 0.55 * len(res) + 1.6))
+    _style(ax)
+    ax.yaxis.grid(False)
+    ax.xaxis.grid(True, color=GRID, lw=0.8)
+    ax.axvline(0, color=MUTED, lw=1)
+    for i, (label, v, t) in enumerate(res):
+        bar = 2 * t["spread_std"]
+        if np.isfinite(bar):
+            ax.fill_betweenx([i - 0.32, i + 0.32], -bar, bar, color=GRID, lw=0, zorder=0)
+        for m, dy, face, name in ((v, -0.14, "white", "val_frozen"), (t, 0.14, INK, "test")):
+            ax.plot(m["ci95"], [i + dy] * 2, color=INK if face == INK else MUTED, lw=1.6, solid_capstyle="round")
+            ax.scatter(m["delta"], i + dy, s=44, facecolors=face, edgecolors=INK if face == INK else MUTED,
+                       linewidths=1.4, zorder=3, label=name if i == 0 else None)
+        ax.annotate(f"test {t['delta']:+.4f}  (val {v['delta']:+.4f})", (max(t["ci95"][1], v["ci95"][1], bar), i),
+                    xytext=(6, 0), textcoords="offset points", va="center", fontsize=7.5, color=INK)
+    ax.fill_betweenx([], 0, 0, color=GRID, label="±2× seed std (test)")
+    ax.set_yticks(range(len(res)), [r[0] for r in res], fontsize=8.5, color=INK)
+    ax.invert_yaxis()
+    xl = ax.get_xlim()
+    ax.set_xlim(xl[0], xl[1] + 0.35 * (xl[1] - xl[0]))
+    ax.set_xlabel("realism difference (b − a), paired over scenarios", fontsize=8.5, color=MUTED)
+    fig.legend(*ax.get_legend_handles_labels(), fontsize=8, frameon=False, loc="lower center", ncol=3)
+    ax.set_title(title, fontsize=10, color=INK)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
 def main():
     """Rebuild the summary figures from the scored runs in runs/ (only runs that exist are used).
     Usage: python -m tokens_vs_flows.figures [--sweep-seed 0]"""
@@ -835,6 +880,23 @@ def main():
                       figs / f"flow_straightness_s{s}.png",
                       title=f"FPO bends the flow head's sampling paths, with or without reward;\nthe velocity anchor "
                             f"keeps them as straight as behaviour cloning's (seed {s})")
+    test_rows = [("flow + history noise − token", "bc_token", "", "bc_flow_noise", ""),
+                 ("flow − token", "bc_token", "", "bc_flow", ""),
+                 ("tuned flow (20 steps) − tuned token (top-k 16)", "bc_token", "_topk16", "bc_flow_noise", "_euler20"),
+                 ("token top-k 16 − top-k 48", "bc_token", "", "bc_token", "_topk16"),
+                 ("flow 20 steps − 10 steps", "bc_flow_noise", "", "bc_flow_noise", "_euler20"),
+                 ("PPO − behaviour cloning (token)", "bc_token", "", "ppo_token", ""),
+                 ("FPO − behaviour cloning (flow)", "bc_flow_noise", "", "fpo_flow_noise", ""),
+                 ("anchored FPO − behaviour cloning (flow)", "bc_flow_noise", "", "fpo_anchored_flow_noise", ""),
+                 ("anchored FPO (flow) − PPO (token)", "ppo_token", "", "fpo_anchored_flow_noise", "")]
+    seeds3 = lambda name, sfx, test: [runs / f"{name}_s{k}{sfx}{'_test' if test else ''}" for k in (0, 1, 2)]
+    have = lambda rs: all((r / "per_scenario.csv").exists() for r in rs)
+    test_rows = [(lab, seeds3(a, sa, False), seeds3(b, sb, False), seeds3(a, sa, True), seeds3(b, sb, True))
+                 for lab, a, sa, b, sb in test_rows]
+    test_rows = [r for r in test_rows if all(have(x) for x in r[1:])]
+    if test_rows:
+        val_vs_test(test_rows, figs / "val_vs_test.png",
+                    title="Held-out test split vs val_frozen: paired realism differences (3 seeds per arm)")
     print("wrote", figs / "realism_ladder.png", figs / f"sampling_sweeps_s{s}.png", figs / "field_gaps_token_vs_flow.png",
           figs / f"field_gaps_freezing_s{s}.png", figs / "standstill.png",
           figs / f"rl_behaviour_s{s}.png", figs / f"flow_straightness_s{s}.png", figs / f"anchor_study_s{s}.png")
