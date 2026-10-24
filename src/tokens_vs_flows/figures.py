@@ -888,6 +888,7 @@ def main():
                  ("PPO − behaviour cloning (token)", "bc_token", "", "ppo_token", ""),
                  ("FPO − behaviour cloning (flow)", "bc_flow_noise", "", "fpo_flow_noise", ""),
                  ("anchored FPO − behaviour cloning (flow)", "bc_flow_noise", "", "fpo_anchored_flow_noise", ""),
+                 ("32-draw clean-sample FPO − behaviour cloning (flow)", "bc_flow_noise", "", "fpo_anchorx1_nmc32_flow_noise", ""),
                  ("anchored FPO (flow) − PPO (token)", "ppo_token", "", "fpo_anchored_flow_noise", "")]
     seeds3 = lambda name, sfx, test: [runs / f"{name}_s{k}{sfx}{'_test' if test else ''}" for k in (0, 1, 2)]
     have = lambda rs: all((r / "per_scenario.csv").exists() for r in rs)
