@@ -804,7 +804,7 @@ def main():
                    pairs("fpo_shuffled_flow_noise", "bc_flow_noise"), "flow"),
                   ("FPO + anchor\nflow", pairs("fpo_anchored_flow_noise", "bc_flow_noise"),
                    pairs("fpo_anchored_shuffled_flow_noise", "bc_flow_noise"), "flow"),
-                  ("FPO + endpoint\nanchor, 32 draws\nflow", pairs("fpo_anchorx1_nmc32_flow_noise", "bc_flow_noise"),
+                  ("FPO + clean-sample\nanchor, 32 draws\nflow", pairs("fpo_anchorx1_nmc32_flow_noise", "bc_flow_noise"),
                    pairs("fpo_anchorx1_nmc32_shuffled_flow_noise", "bc_flow_noise"), "flow")]
     if any(len(a[1]) > 1 for a in seed_arms[1:]):
         rl_seeds(seed_arms, figs / "rl_seeds.png",
