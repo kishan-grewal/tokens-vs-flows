@@ -648,7 +648,7 @@ def rl_seeds(arms: List[Tuple[str, List[Tuple[Path, Path]], List[Tuple[Path, Pat
               ("kinematic change ↑", lambda r, s: load(r, "metrics.json")["kinematic"] - load(s, "metrics.json")["kinematic"]),
               ("false stops ↓", lambda r, s: load(r, "stopping.json")["false_stop"])]
     x = np.arange(len(arms))
-    fig, axes = plt.subplots(1, len(panels), figsize=(3.6 * len(panels), 4.0))
+    fig, axes = plt.subplots(1, len(panels), figsize=((2.2 + 0.85 * len(arms)) * len(panels), 4.2))
     for ax, (name, get) in zip(axes, panels):
         _style(ax)
         for i, (label, runs, ctrls, key) in enumerate(arms):
@@ -799,6 +799,16 @@ def main():
     if len(seed_arms[0][1]) > 1:
         rl_seeds(seed_arms, figs / "ppo_seeds.png",
                  title="PPO on the token head across seeds (100 iterations, val_frozen; each run vs its own "
+                       "behaviour-cloning seed)")
+    seed_arms += [("FPO\nflow", pairs("fpo_flow_noise", "bc_flow_noise"),
+                   pairs("fpo_shuffled_flow_noise", "bc_flow_noise"), "flow"),
+                  ("FPO + anchor\nflow", pairs("fpo_anchored_flow_noise", "bc_flow_noise"),
+                   pairs("fpo_anchored_shuffled_flow_noise", "bc_flow_noise"), "flow"),
+                  ("FPO + endpoint\nanchor, 32 draws\nflow", pairs("fpo_anchorx1_nmc32_flow_noise", "bc_flow_noise"),
+                   pairs("fpo_anchorx1_nmc32_shuffled_flow_noise", "bc_flow_noise"), "flow")]
+    if any(len(a[1]) > 1 for a in seed_arms[1:]):
+        rl_seeds(seed_arms, figs / "rl_seeds.png",
+                 title="Reward fine-tuning across seeds (100 iterations, val_frozen; each run vs its own "
                        "behaviour-cloning seed)")
     anchored = runs / f"fpo_anchored_flow_noise_s{s}"
     rows = [("behaviour cloning", runs / f"bc_flow_noise_s{s}", "bc"),
