@@ -7,6 +7,7 @@
 [![Waymo Open Motion Dataset](https://img.shields.io/badge/data-WOMD%20v1.3.0-1A73E8?style=flat-square)](https://waymo.com/open/)
 [![WOSAC 2025 metric](https://img.shields.io/badge/metric-WOSAC%202025%20realism-0F9D58?style=flat-square)](eval/README.md)
 [![108 GPU-hours](https://img.shields.io/badge/compute-108%20GPU--h-76B900?style=flat-square)](#how-i-kept-it-honest)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
 
 I took one autoregressive traffic simulator (SMART-nano, 1M parameters), kept the backbone fixed and swapped only the action head. With the same data, the same seeds and the same optimiser steps, **the discrete token head is more realistic than a flow-matching head (WOSAC realism 0.745 vs 0.733)**, and the gap holds on a held-out test split. Reward fine-tuning widened it: **PPO on tokens gains a small, consistent +0.005** across three seeds, while FPO on the flow head either drifts or, once anchored, learns almost nothing.
 
@@ -174,6 +175,10 @@ Full environment and data notes: [docs/SETUP.md](docs/SETUP.md). Every scored ru
 | [`figures/`](figures) | every plot and animation referenced here |
 | [`docs/`](docs) | design notes and setup |
 | [`results.tsv`](results.tsv) | one row per scored run |
+
+## Licence
+
+My code is released under the [Apache License 2.0](LICENSE). The catk patch in [`patches/`](patches) is a derivative of catk and stays under the NVIDIA Source Code License for CAT-K (non-commercial use only; see [patches/README.md](patches/README.md)).
 
 ## Data and weights
 
